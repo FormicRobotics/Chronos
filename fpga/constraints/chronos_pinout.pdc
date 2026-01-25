@@ -1,0 +1,162 @@
+# ==============================================================================
+# Chronos Multi-Camera MIPI Sync System - Pin Constraints
+# Target: Lattice CrossLink-NX (LIFCL-40)
+# ==============================================================================
+
+# ==============================================================================
+# Clock Input
+# ==============================================================================
+ldc_set_location -site {L5} [get_ports clk_ref]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33} [get_ports clk_ref]
+create_clock -name clk_ref -period 40.0 [get_ports clk_ref]
+
+# ==============================================================================
+# Reset
+# ==============================================================================
+ldc_set_location -site {M4} [get_ports rst_n]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP} [get_ports rst_n]
+
+# ==============================================================================
+# CSI-2 Camera 0 Input (2-lane)
+# ==============================================================================
+# Clock lane
+ldc_set_location -site {A2} [get_ports csi_rx_clk_p[0]]
+ldc_set_location -site {A3} [get_ports csi_rx_clk_n[0]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[0] csi_rx_clk_n[0]}]
+
+# Data lane 0
+ldc_set_location -site {B2} [get_ports csi_rx_data_p[0][0]]
+ldc_set_location -site {B3} [get_ports csi_rx_data_n[0][0]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[0][0] csi_rx_data_n[0][0]}]
+
+# Data lane 1
+ldc_set_location -site {C2} [get_ports csi_rx_data_p[0][1]]
+ldc_set_location -site {C3} [get_ports csi_rx_data_n[0][1]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[0][1] csi_rx_data_n[0][1]}]
+
+# ==============================================================================
+# CSI-2 Camera 1 Input (2-lane)
+# ==============================================================================
+# Clock lane
+ldc_set_location -site {D2} [get_ports csi_rx_clk_p[1]]
+ldc_set_location -site {D3} [get_ports csi_rx_clk_n[1]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[1] csi_rx_clk_n[1]}]
+
+# Data lane 0
+ldc_set_location -site {E2} [get_ports csi_rx_data_p[1][0]]
+ldc_set_location -site {E3} [get_ports csi_rx_data_n[1][0]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[1][0] csi_rx_data_n[1][0]}]
+
+# Data lane 1
+ldc_set_location -site {F2} [get_ports csi_rx_data_p[1][1]]
+ldc_set_location -site {F3} [get_ports csi_rx_data_n[1][1]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[1][1] csi_rx_data_n[1][1]}]
+
+# ==============================================================================
+# CSI-2 Camera 2 Input (2-lane)
+# ==============================================================================
+# Clock lane
+ldc_set_location -site {G2} [get_ports csi_rx_clk_p[2]]
+ldc_set_location -site {G3} [get_ports csi_rx_clk_n[2]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[2] csi_rx_clk_n[2]}]
+
+# Data lane 0
+ldc_set_location -site {H2} [get_ports csi_rx_data_p[2][0]]
+ldc_set_location -site {H3} [get_ports csi_rx_data_n[2][0]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[2][0] csi_rx_data_n[2][0]}]
+
+# Data lane 1
+ldc_set_location -site {J2} [get_ports csi_rx_data_p[2][1]]
+ldc_set_location -site {J3} [get_ports csi_rx_data_n[2][1]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[2][1] csi_rx_data_n[2][1]}]
+
+# ==============================================================================
+# CSI-2 Camera 3 Input (2-lane)
+# ==============================================================================
+# Clock lane
+ldc_set_location -site {K2} [get_ports csi_rx_clk_p[3]]
+ldc_set_location -site {K3} [get_ports csi_rx_clk_n[3]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[3] csi_rx_clk_n[3]}]
+
+# Data lane 0
+ldc_set_location -site {L2} [get_ports csi_rx_data_p[3][0]]
+ldc_set_location -site {L3} [get_ports csi_rx_data_n[3][0]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[3][0] csi_rx_data_n[3][0]}]
+
+# Data lane 1
+ldc_set_location -site {M2} [get_ports csi_rx_data_p[3][1]]
+ldc_set_location -site {M3} [get_ports csi_rx_data_n[3][1]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[3][1] csi_rx_data_n[3][1]}]
+
+# ==============================================================================
+# CSI-2 Output to Jetson (2-lane)
+# ==============================================================================
+# Clock lane
+ldc_set_location -site {N2} [get_ports csi_tx_clk_p]
+ldc_set_location -site {N3} [get_ports csi_tx_clk_n]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_tx_clk_p csi_tx_clk_n}]
+
+# Data lane 0
+ldc_set_location -site {P2} [get_ports csi_tx_data_p[0]]
+ldc_set_location -site {P3} [get_ports csi_tx_data_n[0]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_tx_data_p[0] csi_tx_data_n[0]}]
+
+# Data lane 1
+ldc_set_location -site {R2} [get_ports csi_tx_data_p[1]]
+ldc_set_location -site {R3} [get_ports csi_tx_data_n[1]]
+ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_tx_data_p[1] csi_tx_data_n[1]}]
+
+# ==============================================================================
+# Trigger Outputs
+# ==============================================================================
+ldc_set_location -site {A10} [get_ports cam_trigger[0]]
+ldc_set_location -site {B10} [get_ports cam_trigger[1]]
+ldc_set_location -site {C10} [get_ports cam_trigger[2]]
+ldc_set_location -site {D10} [get_ports cam_trigger[3]]
+ldc_set_location -site {E10} [get_ports imu_trigger]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=8} [get_ports {cam_trigger[*] imu_trigger}]
+
+# ==============================================================================
+# I2C Configuration Interface
+# ==============================================================================
+ldc_set_location -site {A12} [get_ports i2c_scl]
+ldc_set_location -site {B12} [get_ports i2c_sda]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP OPENDRAIN=ON} [get_ports {i2c_scl i2c_sda}]
+
+# ==============================================================================
+# Status LEDs
+# ==============================================================================
+ldc_set_location -site {A14} [get_ports led_status[0]]
+ldc_set_location -site {B14} [get_ports led_status[1]]
+ldc_set_location -site {C14} [get_ports led_status[2]]
+ldc_set_location -site {D14} [get_ports led_status[3]]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 DRIVE=4} [get_ports led_status[*]]
+
+# ==============================================================================
+# Timing Constraints
+# ==============================================================================
+
+# PLL generated clocks
+create_generated_clock -name clk_200m -source [get_ports clk_ref] -multiply_by 8 [get_pins u_pll/clk_200m]
+create_generated_clock -name clk_byte -source [get_ports clk_ref] -multiply_by 2 [get_pins u_pll/clk_byte]
+
+# MIPI input clocks (worst case 800Mbps = 400MHz DDR)
+create_clock -name csi_rx_clk_0 -period 2.5 [get_ports csi_rx_clk_p[0]]
+create_clock -name csi_rx_clk_1 -period 2.5 [get_ports csi_rx_clk_p[1]]
+create_clock -name csi_rx_clk_2 -period 2.5 [get_ports csi_rx_clk_p[2]]
+create_clock -name csi_rx_clk_3 -period 2.5 [get_ports csi_rx_clk_p[3]]
+
+# Clock domain crossings
+set_clock_groups -asynchronous \
+    -group [get_clocks clk_ref] \
+    -group [get_clocks clk_200m] \
+    -group [get_clocks clk_byte] \
+    -group [get_clocks csi_rx_clk_*]
+
+# I2C is slow - false path
+set_false_path -from [get_ports {i2c_scl i2c_sda}]
+set_false_path -to [get_ports i2c_sda]
+
+# Trigger outputs - max skew constraint
+set_max_delay -from [get_pins u_trigger_gen/trigger_pulse] -to [get_ports cam_trigger[*]] 0.5
+set_max_delay -from [get_pins u_trigger_gen/trigger_pulse] -to [get_ports imu_trigger] 0.5

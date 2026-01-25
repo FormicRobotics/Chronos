@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_OV9281
+	tristate "OmniVision OV9281 sensor support"
+	depends on I2C && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  This is a V4L2 sensor driver for the OmniVision OV9281
+	  global shutter camera sensor.
+
+	  The OV9281 is a 1MP (1280x800) monochrome global shutter
+	  sensor with MIPI CSI-2 interface, commonly used for
+	  machine vision and depth sensing applications.
+
+	  Supports external trigger mode via FSIN pin for
+	  multi-camera synchronization.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ov9281.
