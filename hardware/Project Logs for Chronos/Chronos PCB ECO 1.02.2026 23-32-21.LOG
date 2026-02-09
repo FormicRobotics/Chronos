@@ -1,0 +1,17 @@
+Removed Pin From Net: NetName=GND Pin=D2-6
+Removed Pin From Net: NetName=GND Pin=L2-1
+Added Component: Designator=C8(C0402)
+Add component (AddParameter): Name = "Assy"; Value = "-"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Class"; Value = "Discrete"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Digikey P/N"; Value = "399-3521-2-ND"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer"; Value = "Murata"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer Part Number"; Value = "GRM033R61E104KE14J"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Part Reference"; Value = "C8"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PCB Footprint"; Value = "C0201"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = "0.1uF"; VariantName = "[No Variations]"
+Added Pin To Net: NetName=GND Pin=C8-2
+Added Pin To Net: NetName=VBUS_5V Pin=C8-1
+Added Pin To Net: NetName=VBUS_5V Pin=D2-6
+Added Pin To Net: NetName=VBUS_5V Pin=L2-1
+Added Net: Name=VBUS_5V
+Added Member To Class: ClassName=07 - USB Interface Member=Component C8 0.1uF

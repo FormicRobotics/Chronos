@@ -1,0 +1,29 @@
+Removed Pin From Net: NetName=VBUS Pin=J2-1
+Removed Pin From Net: NetName=USB_D_N Pin=J2-2
+Removed Pin From Net: NetName=USB_D_P Pin=J2-3
+Removed Pin From Net: NetName=GND Pin=J2-7
+Removed Pin From Net: NetName=GND Pin=J2-8
+Removed Pin From Net: NetName=GND Pin=J2-9
+Change Component Footprint: Designator=J2 Old Footprint=USB_MINI_B-1734035-2 New Footprint=FP-DX07S016JA3R1500-MFG
+Change Component Comment : Designator=J2 Old Comment=USB_MINI_B New Comment=DX07S016JA3R1500
+Change Managed Component Library Link : Designator=J2 Old VaultGUID= New VaultGUID=B7D15EC3-160A-466F-A46C-7801FE6295A7 Old ItemGUID= New ItemGUID=A223E8C2-4906-41F8-AB44-3D66CB88E2D2 Old RevisionGUID= New RevisionGUID=6E2F11CF-AFD0-4454-8784-5EA8574A6109
+Change component parameters: Designator = "J2" ("J2"); Footprint = "USB_MINI_B-1734035-2"; UniqueID = "\USHSPNEB" ("\USHSPNEB")
+Added Pin To Net: NetName=GND Pin=C8-1
+Added Pin To Net: NetName=GND Pin=D2-6
+Added Pin To Net: NetName=GND Pin=J2-1
+Added Pin To Net: NetName=GND Pin=J2-2
+Added Pin To Net: NetName=GND Pin=J2-3
+Added Pin To Net: NetName=GND Pin=J2-4
+Added Pin To Net: NetName=GND Pin=J2-A1/B12
+Added Pin To Net: NetName=VBUS Pin=J2-A4/B9
+Added Pin To Net: NetName=USB_D_P Pin=J2-A6
+Added Pin To Net: NetName=USB_D_N Pin=J2-A7
+Added Pin To Net: NetName=GND Pin=J2-A12/B1
+Added Pin To Net: NetName=VBUS Pin=J2-B4/A9
+Added Pin To Net: NetName=USB_D_P Pin=J2-B6
+Added Pin To Net: NetName=USB_D_N Pin=J2-B7
+Added Pin To Net: NetName=GND Pin=L2-1
+Added Pin To Net: NetName=NetJ2_A5 Pin=J2-A5
+Added Net: Name=NetJ2_A5
+Added Pin To Net: NetName=NetJ2_B5 Pin=J2-B5
+Added Net: Name=NetJ2_B5

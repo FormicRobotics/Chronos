@@ -1,0 +1,12 @@
+Record=TopLevelDocument|FileName=01- Power Regulators.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=02 - Power CSI and Bank Power.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=03- Power Decoupling.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=04 - Camera Interface.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=05 - Camera Interface 2.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=06 - Soft_DPHY.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=07 - USB Interface.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=08- Bank2_6_7.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=09- I2C, LEDs And Push Button.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=10 - Configuration And ADC.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=11- IMU.SchDoc|SheetNumber= 
+Record=NoMainPathDocument|SourceDocument=01- Power Regulators.SchDoc|FileName=12 - JETSON_CON.SchDoc|SheetNumber= 

@@ -1,0 +1,78 @@
+Protel Design System Design Rule Check
+PCB File : D:\github_projects\hw-works\hw-works\Chronos\Chronos.PcbDoc
+Date     : 7.02.2026
+Time     : 16:45:31
+
+Processing Rule : Clearance Constraint (Gap=6mil) (All),(All)
+Rule Violations :0
+
+Processing Rule : Clearance Constraint (Gap=6mil) (InDifferentialPairClass('DIFF100')),(All)
+Rule Violations :0
+
+Processing Rule : Clearance Constraint (Gap=4mil) (WithinRoom('BGA_ROOM')),(All)
+Rule Violations :0
+
+Processing Rule : Clearance Constraint (Gap=5mil) (HasFootprint('4XDFN_NCP110')),(All)
+Rule Violations :0
+
+Processing Rule : Short-Circuit Constraint (Allowed=No) (All),(All)
+Rule Violations :0
+
+Processing Rule : Un-Routed Net Constraint ( (All) )
+Rule Violations :0
+
+Processing Rule : Modified Polygon (Allow modified: No), (Allow shelved: No)
+Rule Violations :0
+
+Processing Rule : Width Constraint (Min=4.5mil) (Max=30mil) (Preferred=6mil) (All)
+Rule Violations :0
+
+Processing Rule : Power Plane Connect Rule(Direct Connect )(Expansion=20mil) (Conductor Width=10mil) (Air Gap=10mil) (Entries=4) (All)
+Rule Violations :0
+
+Processing Rule : Hole Size Constraint (Min=1mil) (Max=150mil) (All)
+Rule Violations :0
+
+Processing Rule : Hole To Hole Clearance (Gap=7.874mil) (All),(All)
+Rule Violations :0
+
+Processing Rule : Minimum Solder Mask Sliver (Gap=0mil) (All),(All)
+Rule Violations :0
+
+Processing Rule : Silk To Solder Mask (Clearance=0mil) (IsPad),(All)
+Rule Violations :0
+
+Processing Rule : Silk to Silk (Clearance=0mil) (All),(All)
+Rule Violations :0
+
+Processing Rule : Net Antennae (Tolerance=0mil) (All)
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM0'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM3'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM2'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM1'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=3.937mil) (InDifferentialPairClass('DIFF100'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM'))
+Rule Violations :0
+
+Processing Rule : Room BGA_ROOM (Bounding Region = (3897.638mil, 7574.803mil, 4614.173mil, 8299.213mil) (False)
+Rule Violations :0
+
+Processing Rule : Height Constraint (Min=0mil) (Max=1000mil) (Prefered=500mil) (All)
+Rule Violations :0
+
+
+Violations Detected : 0
+Waived Violations : 0
+Time Elapsed        : 00:00:04

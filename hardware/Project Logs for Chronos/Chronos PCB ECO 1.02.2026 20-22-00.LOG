@@ -1,0 +1,16 @@
+Removed Pin From Net: NetName=V1P8 Pin=C23-1
+Removed Pin From Net: NetName=V1P8 Pin=C24-1
+Removed Pin From Net: NetName=V1P8 Pin=C41-1
+Removed Pin From Net: NetName=V1P8 Pin=C42-1
+Removed Pin From Net: NetName=V1P8 Pin=C48-1
+Removed Pin From Net: NetName=V1P8 Pin=C49-1
+Removed Pin From Net: NetName=V1P8 Pin=C105-1
+Removed Pin From Net: NetName=V1P8 Pin=C171-1
+Added Pin To Net: NetName=VCCIO5 Pin=C23-1
+Added Pin To Net: NetName=VCCIO5 Pin=C24-1
+Added Pin To Net: NetName=VCCIO5 Pin=C41-1
+Added Pin To Net: NetName=VCCIO5 Pin=C42-1
+Added Pin To Net: NetName=VCCIO5 Pin=C48-1
+Added Pin To Net: NetName=VCCIO5 Pin=C49-1
+Added Pin To Net: NetName=VCCIO5 Pin=C105-1
+Added Pin To Net: NetName=VCCIO5 Pin=C171-1
