@@ -1,7 +1,10 @@
 Protel Design System Design Rule Check
-PCB File : D:\github_projects\hw-works\hw-works\Chronos\Chronos.PcbDoc
-Date     : 7.02.2026
-Time     : 16:45:31
+PCB File : C:\Users\numan\Documents\Github\hw-works\Chronos\Chronos.PcbDoc
+Date     : 10-2-2026
+Time     : 1:02:30 AM
+
+Processing Rule : Clearance Constraint (Gap=4mil) (WithinRoom('BGA_ROOM')),(All)
+Rule Violations :0
 
 Processing Rule : Clearance Constraint (Gap=6mil) (All),(All)
 Rule Violations :0
@@ -9,7 +12,7 @@ Rule Violations :0
 Processing Rule : Clearance Constraint (Gap=6mil) (InDifferentialPairClass('DIFF100')),(All)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=4mil) (WithinRoom('BGA_ROOM')),(All)
+Processing Rule : Clearance Constraint (Gap=20mil) ((ObjectKind = 'Track') And (Layer = 'L06_SIG') and  InDifferentialPairClass('DIFF100')),(IsRegion)
 Rule Violations :0
 
 Processing Rule : Clearance Constraint (Gap=5mil) (HasFootprint('4XDFN_NCP110')),(All)
@@ -75,4 +78,4 @@ Rule Violations :0
 
 Violations Detected : 0
 Waived Violations : 0
-Time Elapsed        : 00:00:04
+Time Elapsed        : 00:00:01
