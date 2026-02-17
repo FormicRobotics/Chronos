@@ -1,21 +1,21 @@
 Protel Design System Design Rule Check
-PCB File : C:\Users\numan\Documents\Github\hw-works\Chronos\Chronos.PcbDoc
-Date     : 10-2-2026
-Time     : 1:02:30 AM
+PCB File : D:\github_projects\hw-works\hw-works-main\Chronos\Chronos.PcbDoc
+Date     : 15.02.2026
+Time     : 18:05:48
 
-Processing Rule : Clearance Constraint (Gap=4mil) (WithinRoom('BGA_ROOM')),(All)
+Processing Rule : Clearance Constraint (Gap=0.127mm) (HasFootprint('4XDFN_NCP110') or HasFootprint('4X2SON')),(All)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=6mil) (All),(All)
+Processing Rule : Clearance Constraint (Gap=0.152mm) (InDifferentialPairClass('DIFF100')),(All)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=6mil) (InDifferentialPairClass('DIFF100')),(All)
+Processing Rule : Clearance Constraint (Gap=0.102mm) (WithinRoom('BGA_ROOM')),(All)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=20mil) ((ObjectKind = 'Track') And (Layer = 'L06_SIG') and  InDifferentialPairClass('DIFF100')),(IsRegion)
+Processing Rule : Clearance Constraint (Gap=0.508mm) ((ObjectKind = 'Track') And (Layer = 'L06_SIG') and  InDifferentialPairClass('DIFF100')),(IsRegion)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=5mil) (HasFootprint('4XDFN_NCP110')),(All)
+Processing Rule : Clearance Constraint (Gap=0.152mm) (All),(All)
 Rule Violations :0
 
 Processing Rule : Short-Circuit Constraint (Allowed=No) (All),(All)
@@ -27,55 +27,61 @@ Rule Violations :0
 Processing Rule : Modified Polygon (Allow modified: No), (Allow shelved: No)
 Rule Violations :0
 
-Processing Rule : Width Constraint (Min=4.5mil) (Max=30mil) (Preferred=6mil) (All)
+Processing Rule : Width Constraint (Min=0.114mm) (Max=0.762mm) (Preferred=0.152mm) (All)
 Rule Violations :0
 
-Processing Rule : Power Plane Connect Rule(Direct Connect )(Expansion=20mil) (Conductor Width=10mil) (Air Gap=10mil) (Entries=4) (All)
+Processing Rule : Power Plane Connect Rule(Direct Connect )(Expansion=0.508mm) (Conductor Width=0.254mm) (Air Gap=0.254mm) (Entries=4) (All)
 Rule Violations :0
 
-Processing Rule : Hole Size Constraint (Min=1mil) (Max=150mil) (All)
+Processing Rule : Minimum Annular Ring (Minimum=0.075mm) (not ((ObjectKind = 'Pad') and (Component = 'Free')))
 Rule Violations :0
 
-Processing Rule : Hole To Hole Clearance (Gap=7.874mil) (All),(All)
+Processing Rule : Hole Size Constraint (Min=0.025mm) (Max=3.81mm) (All)
 Rule Violations :0
 
-Processing Rule : Minimum Solder Mask Sliver (Gap=0mil) (All),(All)
+Processing Rule : Hole To Hole Clearance (Gap=0.2mm) (All),(All)
 Rule Violations :0
 
-Processing Rule : Silk To Solder Mask (Clearance=0mil) (IsPad),(All)
+Processing Rule : Minimum Solder Mask Sliver (Gap=0.076mm) (All),(All)
 Rule Violations :0
 
-Processing Rule : Silk to Silk (Clearance=0mil) (All),(All)
+Processing Rule : Silk To Solder Mask (Clearance=0.15mm) (IsText),(All)
 Rule Violations :0
 
-Processing Rule : Net Antennae (Tolerance=0mil) (All)
+Processing Rule : Silk to Silk (Clearance=0mm) (All),(All)
 Rule Violations :0
 
-Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM0'))
+Processing Rule : Net Antennae (Tolerance=0mm) (All)
 Rule Violations :0
 
-Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM3'))
+Processing Rule : Board Clearance Constraint (Gap=0mm) (All)
 Rule Violations :0
 
-Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM2'))
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM0'))
 Rule Violations :0
 
-Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM1'))
+Processing Rule : Matched Lengths(Tolerance=0.1mm) (InDifferentialPairClass('DIFF100'))
 Rule Violations :0
 
-Processing Rule : Matched Lengths(Tolerance=3.937mil) (InDifferentialPairClass('DIFF100'))
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM3'))
 Rule Violations :0
 
-Processing Rule : Matched Lengths(Tolerance=39.37mil) (InNetClass('CAM'))
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM'))
 Rule Violations :0
 
-Processing Rule : Room BGA_ROOM (Bounding Region = (3897.638mil, 7574.803mil, 4614.173mil, 8299.213mil) (False)
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM1'))
 Rule Violations :0
 
-Processing Rule : Height Constraint (Min=0mil) (Max=1000mil) (Prefered=500mil) (All)
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM2'))
+Rule Violations :0
+
+Processing Rule : Room BGA_ROOM (Bounding Region = (99mm, 192.4mm, 117.2mm, 210.8mm) (False)
+Rule Violations :0
+
+Processing Rule : Height Constraint (Min=0mm) (Max=25.4mm) (Prefered=12.7mm) (All)
 Rule Violations :0
 
 
 Violations Detected : 0
 Waived Violations : 0
-Time Elapsed        : 00:00:01
+Time Elapsed        : 00:00:05

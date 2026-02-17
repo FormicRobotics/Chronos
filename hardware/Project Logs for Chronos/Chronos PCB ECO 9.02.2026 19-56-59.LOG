@@ -1,4 +1,0 @@
-Removed Pin From Net: NetName=VCCIO5 Pin=R36-2
-Removed Pin From Net: NetName=VCCIO5 Pin=R51-2
-Added Pin To Net: NetName=VCCIO6 Pin=R36-2
-Added Pin To Net: NetName=VCCIO6 Pin=R51-2
