@@ -1,9 +1,9 @@
 Protel Design System Design Rule Check
-PCB File : C:\Users\HAltinkilit\Downloads\Chronos_20_02_2026\Chronos\Chronos.PcbDoc
-Date     : 2/21/2026
-Time     : 12:33:43 AM
+PCB File : D:\github_projects\hw-works\hw-works-main\Chronos\Chronos.PcbDoc
+Date     : 19.02.2026
+Time     : 21:05:20
 
-Processing Rule : Clearance Constraint (Gap=0.152mm) (All),(All)
+Processing Rule : Clearance Constraint (Gap=0.127mm) (HasFootprint('4XDFN_NCP110') or HasFootprint('4X2SON')),(All)
 Rule Violations :0
 
 Processing Rule : Clearance Constraint (Gap=0.152mm) (InDifferentialPairClass('DIFF100')),(All)
@@ -12,10 +12,10 @@ Rule Violations :0
 Processing Rule : Clearance Constraint (Gap=0.102mm) (WithinRoom('BGA_ROOM')),(All)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=0.127mm) (HasFootprint('4XDFN_NCP110') or HasFootprint('4X2SON')),(All)
+Processing Rule : Clearance Constraint (Gap=0.508mm) ((ObjectKind = 'Track') And (Layer = 'L06_SIG') and  InDifferentialPairClass('DIFF100')),(IsRegion)
 Rule Violations :0
 
-Processing Rule : Clearance Constraint (Gap=0.508mm) ((ObjectKind = 'Track') And (Layer = 'L06_SIG') and  InDifferentialPairClass('DIFF100')),(IsRegion)
+Processing Rule : Clearance Constraint (Gap=0.152mm) (All),(All)
 Rule Violations :0
 
 Processing Rule : Short-Circuit Constraint (Allowed=No) (All),(All)
@@ -57,25 +57,22 @@ Rule Violations :0
 Processing Rule : Board Clearance Constraint (Gap=0mm) (All)
 Rule Violations :0
 
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM0'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=0.1mm) (InDifferentialPairClass('DIFF100'))
+Rule Violations :0
+
 Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM3'))
+Rule Violations :0
+
+Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM'))
 Rule Violations :0
 
 Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM1'))
 Rule Violations :0
 
 Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM2'))
-Rule Violations :0
-
-Processing Rule : Matched Lengths(Tolerance=0.1mm) (InDifferentialPairClass('DIFF100'))
-   Violation between Matched Net Lengths: Between Net CAM1_1_N And Net CAM1_1_P Actual Difference against CAM1_1_P is: 0.217mm, Tolerance : 0.1mm. 
-   Violation between Matched Net Lengths: Between Net CAM2_CLK_N And Net CAM2_CLK_P Actual Difference against CAM2_CLK_P is: 0.133mm, Tolerance : 0.1mm. 
-   Violation between Matched Net Lengths: Between Net CAM3_1_N And Net CAM3_1_P Actual Difference against CAM3_1_P is: 0.215mm, Tolerance : 0.1mm. 
-Rule Violations :3
-
-Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM'))
-Rule Violations :0
-
-Processing Rule : Matched Lengths(Tolerance=1mm) (InNetClass('CAM0'))
 Rule Violations :0
 
 Processing Rule : Room BGA_ROOM (Bounding Region = (99mm, 192.4mm, 117.2mm, 210.8mm) (False)
@@ -85,6 +82,6 @@ Processing Rule : Height Constraint (Min=0mm) (Max=25.4mm) (Prefered=12.7mm) (Al
 Rule Violations :0
 
 
-Violations Detected : 3
+Violations Detected : 0
 Waived Violations : 0
-Time Elapsed        : 00:00:03
+Time Elapsed        : 00:00:05
