@@ -1,281 +1,173 @@
 //==============================================================================
-// Frame Buffer - SRAM-based Line Buffer with Flow Control
+// frame_buffer - per-camera asynchronous FWFT token FIFO
 //==============================================================================
+// Bridges a camera's recovered byte-clock domain (write) to the TX byte-clock
+// domain (read), and stores the CSI-2 packet token stream from csi2_rx:
+//   token = {is_sop, last, data[31:0]}
+// where a SOP token carries packed packet metadata (csi2_pkg::pack_sop) and
+// data tokens carry payload words; 'last' marks the final token of a packet
+// (the SOP itself for short packets).
 //
-// Copyright (C) 2025 Chronos Project
-// SPDX-License-Identifier: Proprietary
-//
-// Description:
-//   Implements a FIFO-based line buffer between CSI-2 RX and TX stages.
-//   Each camera has its own buffer instance to absorb timing variations
-//   and enable round-robin arbitration by the TX arbiter.
-//
-// Architecture:
-//   - Dual-port SRAM organized as circular FIFO
-//   - Gray-coded pointers for clock domain crossing (if needed)
-//   - Metadata stored alongside data for packet reconstruction
-//   - Overflow detection with sticky error flag
-//
-// Buffer Organization:
-//   +------------------+------------------+
-//   |   Data (32-bit)  | Metadata (26-bit)|
-//   +------------------+------------------+
-//   |    Pixel data    | DT, WC, Flags    |
-//   +------------------+------------------+
-//
-// Capacity:
-//   - DEPTH entries × 32-bit data = line buffer capacity
-//   - 4096 entries = enough for ~5 lines at 1280 pixels
-//   - Sufficient for multi-line buffering during arbitration
-//
-// Flow Control:
-//   - Write side: drops data when full (overflow flagged)
-//   - Read side: waits when empty (controlled by arbiter)
-//   - No backpressure to RX (would cause MIPI errors)
-//
+// Rewrite vs old design:
+//   * True dual-clock async FIFO (Gray-coded pointers) instead of a single-clock
+//     buffer that assumed RX and TX shared one clock.
+//   * First-word-fall-through: rd_data/rd_is_sop/rd_last are valid whenever
+//     rd_valid is high; rd_en pops. (Old design needed a read before data
+//     appeared, which deadlocked the arbiter handshake.)
+//   * pkt_avail: asserted only when at least one COMPLETE packet is buffered, so
+//     the arbiter never starts a packet that would underflow mid-HS.
 //==============================================================================
 
 `timescale 1ns / 1ps
 `default_nettype none
 
 module frame_buffer #(
-    //--------------------------------------------------------------------------
-    // Parameters
-    //--------------------------------------------------------------------------
-    parameter int DATA_WIDTH = 32,              // Pixel data width
-    parameter int DEPTH      = 4096,            // FIFO depth (entries)
-    parameter int CAMERA_ID  = 0                // Camera identifier (debug)
+    parameter int ADDR_WIDTH = 11,          // 2048 tokens (~5 lines of RAW10)
+    parameter int CAMERA_ID  = 0
 )(
-    //--------------------------------------------------------------------------
-    // Clock and Reset
-    //--------------------------------------------------------------------------
-    input  wire                     clk,        // System clock
-    input  wire                     rst_n,      // Active-low reset
-    
-    //--------------------------------------------------------------------------
-    // Write Interface (from CSI-2 RX)
-    // Data is written every clock cycle when wr_en is high
-    //--------------------------------------------------------------------------
-    input  wire                     wr_en,          // Write enable
-    input  wire  [DATA_WIDTH-1:0]   wr_data,        // Pixel data
-    input  wire                     wr_frame_start, // Frame start flag
-    input  wire                     wr_frame_end,   // Frame end flag
-    input  wire                     wr_line_start,  // Line start flag
-    input  wire                     wr_line_end,    // Line end flag
-    input  wire  [5:0]              wr_data_type,   // CSI-2 data type
-    input  wire  [15:0]             wr_word_count,  // Packet word count
-    
-    //--------------------------------------------------------------------------
-    // Read Interface (to TX Arbiter)
-    // Data appears one cycle after rd_en is asserted
-    //--------------------------------------------------------------------------
-    input  wire                     rd_en,          // Read enable
-    output logic [DATA_WIDTH-1:0]   rd_data,        // Pixel data
-    output logic                    rd_frame_start, // Frame start flag
-    output logic                    rd_frame_end,   // Frame end flag
-    output logic                    rd_line_start,  // Line start flag
-    output logic                    rd_line_end,    // Line end flag
-    output logic [5:0]              rd_data_type,   // CSI-2 data type
-    output logic [15:0]             rd_word_count,  // Packet word count
-    output logic                    rd_valid,       // Read data valid
-    
-    //--------------------------------------------------------------------------
-    // Status Outputs
-    //--------------------------------------------------------------------------
-    output logic                    empty,          // Buffer is empty
-    output logic                    full,           // Buffer is full
-    output logic                    overflow,       // Overflow occurred (sticky)
-    output logic [$clog2(DEPTH):0]  level           // Current fill level
+    // Write side (camera recovered byte clock)
+    input  wire        wr_clk,
+    input  wire        wr_rst_n,
+    input  wire        wr_en,
+    input  wire        wr_is_sop,
+    input  wire        wr_last,
+    input  wire [31:0] wr_data,
+    output wire        full,
+    output logic       overflow,
+
+    // Read side (TX byte clock)
+    input  wire        rd_clk,
+    input  wire        rd_rst_n,
+    input  wire        rd_en,
+    output wire        rd_valid,
+    output wire        rd_is_sop,
+    output wire        rd_last,
+    output wire [31:0] rd_data,
+    output wire        empty,
+    output wire        pkt_avail
 );
 
-    //==========================================================================
-    // Local Parameters
-    //==========================================================================
-    
-    localparam int ADDR_WIDTH = $clog2(DEPTH);
-    
-    // Metadata bit allocation:
-    // [25:20] = data_type (6 bits)
-    // [19:4]  = word_count (16 bits)
-    // [3]     = frame_start
-    // [2]     = frame_end
-    // [1]     = line_start
-    // [0]     = line_end
-    localparam int META_WIDTH = 6 + 16 + 4;     // 26 bits total
-    
-    //==========================================================================
-    // FIFO Pointer Registers
-    //==========================================================================
-    
-    // Pointers are one bit wider than address to detect wrap-around
-    logic [ADDR_WIDTH:0] wr_ptr, rd_ptr;
-    logic [ADDR_WIDTH:0] wr_ptr_next, rd_ptr_next;
-    
-    //==========================================================================
-    // Memory Arrays
-    //==========================================================================
-    // These will infer to SRAM blocks in the CrossLink-NX
-    // Using separate arrays for data and metadata
-    
+    localparam int DEPTH = (1 << ADDR_WIDTH);
+    localparam int TW    = 34;              // {is_sop,last,data[31:0]}
+
     (* ram_style = "block" *)
-    logic [DATA_WIDTH-1:0] data_mem [DEPTH-1:0];
-    
-    (* ram_style = "block" *)
-    logic [META_WIDTH-1:0] meta_mem [DEPTH-1:0];
-    
-    //==========================================================================
-    // Metadata Packing/Unpacking
-    //==========================================================================
-    
-    logic [META_WIDTH-1:0] wr_meta, rd_meta;
-    
-    // Pack write metadata into single vector
-    assign wr_meta = {
-        wr_data_type,       // [25:20]
-        wr_word_count,      // [19:4]
-        wr_frame_start,     // [3]
-        wr_frame_end,       // [2]
-        wr_line_start,      // [1]
-        wr_line_end         // [0]
-    };
-    
-    //==========================================================================
-    // FIFO Status Logic
-    //==========================================================================
-    
-    // Next pointer values (for combinational status)
-    assign wr_ptr_next = wr_ptr + 1'b1;
-    assign rd_ptr_next = rd_ptr + 1'b1;
-    
-    // Empty: pointers are equal
-    assign empty = (wr_ptr == rd_ptr);
-    
-    // Full: pointers differ only in MSB (wrapped)
-    // This means write pointer has caught up to read pointer
-    assign full = (wr_ptr[ADDR_WIDTH] != rd_ptr[ADDR_WIDTH]) && 
-                  (wr_ptr[ADDR_WIDTH-1:0] == rd_ptr[ADDR_WIDTH-1:0]);
-    
-    // Fill level: difference between pointers
-    assign level = wr_ptr - rd_ptr;
-    
-    //==========================================================================
-    // Write Logic
-    //==========================================================================
-    // Write when enabled and not full
-    // If full, data is dropped and overflow flag is set
-    
-    logic overflow_detect;
-    
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            wr_ptr         <= '0;
-            overflow_detect <= 1'b0;
+    logic [TW-1:0] mem [DEPTH-1:0];
+
+    //--------------------------------------------------------------------------
+    // helpers
+    //--------------------------------------------------------------------------
+    function automatic logic [ADDR_WIDTH:0] bin2gray(input logic [ADDR_WIDTH:0] b);
+        return b ^ (b >> 1);
+    endfunction
+    function automatic logic [ADDR_WIDTH:0] gray2bin(input logic [ADDR_WIDTH:0] g);
+        logic [ADDR_WIDTH:0] b;
+        b[ADDR_WIDTH] = g[ADDR_WIDTH];
+        for (int i = ADDR_WIDTH-1; i >= 0; i--) b[i] = b[i+1] ^ g[i];
+        return b;
+    endfunction
+
+    //--------------------------------------------------------------------------
+    // Write domain
+    //--------------------------------------------------------------------------
+    logic [ADDR_WIDTH:0] wr_bin, wr_gray;
+    logic [ADDR_WIDTH:0] rd_gray_w1, rd_gray_w2;   // rd_gray synced to wr
+    logic [7:0]          pkt_wr;                    // complete-packet count (wr)
+    logic [7:0]          pkt_wr_gray;
+
+    wire [ADDR_WIDTH:0] wr_bin_next = wr_bin + 1'b1;
+    assign full = (bin2gray(wr_bin_next) ==
+                   {~rd_gray_w2[ADDR_WIDTH:ADDR_WIDTH-1], rd_gray_w2[ADDR_WIDTH-2:0]});
+
+    always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) begin
+            wr_bin   <= '0;
+            wr_gray  <= '0;
+            overflow <= 1'b0;
+            pkt_wr   <= 8'd0;
         end else begin
-            overflow_detect <= 1'b0;
-            
             if (wr_en) begin
                 if (!full) begin
-                    // Normal write
-                    data_mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_data;
-                    meta_mem[wr_ptr[ADDR_WIDTH-1:0]] <= wr_meta;
-                    wr_ptr <= wr_ptr_next;
+                    mem[wr_bin[ADDR_WIDTH-1:0]] <= {wr_is_sop, wr_last, wr_data};
+                    wr_bin  <= wr_bin_next;
+                    wr_gray <= bin2gray(wr_bin_next);
+                    if (wr_last) pkt_wr <= pkt_wr + 8'd1;
                 end else begin
-                    // Buffer full - drop data and flag overflow
-                    overflow_detect <= 1'b1;
-                    // synthesis translate_off
-                    $warning("[Frame Buffer %0d] Overflow! Data dropped.", CAMERA_ID);
-                    // synthesis translate_on
+                    overflow <= 1'b1;
                 end
             end
         end
     end
-    
-    //--------------------------------------------------------------------------
-    // Sticky Overflow Flag
-    // Set on overflow, cleared only by reset
-    //--------------------------------------------------------------------------
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            overflow <= 1'b0;
-        else if (overflow_detect)
-            overflow <= 1'b1;
-        // To clear: assert reset or add clear input
+    always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) pkt_wr_gray <= 8'd0;
+        else           pkt_wr_gray <= pkt_wr ^ (pkt_wr >> 1);
     end
-    
-    //==========================================================================
-    // Read Logic
-    //==========================================================================
-    // Read when enabled and not empty
-    // Data appears on next clock cycle (registered output)
-    
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_ptr   <= '0;
-            rd_valid <= 1'b0;
+
+    // rd_gray -> wr domain sync
+    logic [ADDR_WIDTH:0] rd_gray_r;
+    always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) begin rd_gray_w1 <= '0; rd_gray_w2 <= '0; end
+        else           begin rd_gray_w1 <= rd_gray_r; rd_gray_w2 <= rd_gray_w1; end
+    end
+
+    //--------------------------------------------------------------------------
+    // Read domain (FWFT)
+    //--------------------------------------------------------------------------
+    logic [ADDR_WIDTH:0] rd_bin;
+    logic [ADDR_WIDTH:0] wr_gray_r1, wr_gray_r2;   // wr_gray synced to rd
+    logic [7:0]          pkt_wr_g1, pkt_wr_g2;      // pkt_wr_gray synced to rd
+    logic [7:0]          pkt_rd;                    // packets fully popped (rd)
+    logic                dout_valid;
+    logic [TW-1:0]       dout;
+
+    assign rd_gray_r = bin2gray(rd_bin);
+    wire mem_empty = (bin2gray(rd_bin) == wr_gray_r2);
+
+    always_ff @(posedge rd_clk or negedge rd_rst_n) begin
+        if (!rd_rst_n) begin wr_gray_r1 <= '0; wr_gray_r2 <= '0; end
+        else           begin wr_gray_r1 <= wr_gray; wr_gray_r2 <= wr_gray_r1; end
+    end
+    always_ff @(posedge rd_clk or negedge rd_rst_n) begin
+        if (!rd_rst_n) begin pkt_wr_g1 <= 8'd0; pkt_wr_g2 <= 8'd0; end
+        else           begin pkt_wr_g1 <= pkt_wr_gray; pkt_wr_g2 <= pkt_wr_g1; end
+    end
+
+    // gray->bin of synced complete-packet count
+    logic [7:0] pkt_wr_bin_rd;
+    always_comb begin
+        pkt_wr_bin_rd[7] = pkt_wr_g2[7];
+        for (int i = 6; i >= 0; i--)
+            pkt_wr_bin_rd[i] = pkt_wr_bin_rd[i+1] ^ pkt_wr_g2[i];
+    end
+
+    always_ff @(posedge rd_clk or negedge rd_rst_n) begin
+        if (!rd_rst_n) begin
+            rd_bin     <= '0;
+            dout_valid <= 1'b0;
+            dout       <= '0;
+            pkt_rd     <= 8'd0;
         end else begin
-            rd_valid <= 1'b0;
-            
-            if (rd_en && !empty) begin
-                rd_ptr   <= rd_ptr_next;
-                rd_valid <= 1'b1;
+            if (!mem_empty && (!dout_valid || rd_en)) begin
+                dout       <= mem[rd_bin[ADDR_WIDTH-1:0]];
+                rd_bin     <= rd_bin + 1'b1;
+                dout_valid <= 1'b1;
+            end else if (rd_en) begin
+                dout_valid <= 1'b0;
             end
+            if (rd_en && dout_valid && dout[TW-2] /*last*/)
+                pkt_rd <= pkt_rd + 8'd1;
         end
     end
-    
-    //--------------------------------------------------------------------------
-    // Registered Read Data Output
-    // One cycle latency from rd_en to data valid
-    //--------------------------------------------------------------------------
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_data <= '0;
-            rd_meta <= '0;
-        end else if (rd_en && !empty) begin
-            rd_data <= data_mem[rd_ptr[ADDR_WIDTH-1:0]];
-            rd_meta <= meta_mem[rd_ptr[ADDR_WIDTH-1:0]];
-        end
-    end
-    
-    //--------------------------------------------------------------------------
-    // Unpack Read Metadata
-    //--------------------------------------------------------------------------
-    assign rd_data_type   = rd_meta[25:20];
-    assign rd_word_count  = rd_meta[19:4];
-    assign rd_frame_start = rd_meta[3];
-    assign rd_frame_end   = rd_meta[2];
-    assign rd_line_start  = rd_meta[1];
-    assign rd_line_end    = rd_meta[0];
-    
-    //==========================================================================
-    // Debug/Simulation Support
-    //==========================================================================
-    
-    `ifdef SIMULATION
-    
-    // Track statistics
-    integer total_writes = 0;
-    integer total_reads = 0;
-    integer total_overflows = 0;
-    
-    always_ff @(posedge clk) begin
-        if (wr_en && !full)
-            total_writes++;
-        if (rd_en && !empty)
-            total_reads++;
-        if (overflow_detect)
-            total_overflows++;
-    end
-    
-    // Periodic status report
-    initial begin
-        forever begin
-            #1000000;  // Every 1ms at 1ns timescale
-            $display("[Frame Buffer %0d] Level=%0d Writes=%0d Reads=%0d Overflows=%0d",
-                     CAMERA_ID, level, total_writes, total_reads, total_overflows);
-        end
-    end
-    
-    `endif
+
+    assign rd_valid  = dout_valid;
+    assign rd_is_sop = dout[TW-1];
+    assign rd_last   = dout[TW-2];
+    assign rd_data   = dout[31:0];
+    assign empty     = !dout_valid && mem_empty;
+    assign pkt_avail = (pkt_wr_bin_rd != pkt_rd);
+
+    /* verilator lint_off UNUSED */
+    wire _unused = &{1'b0, CAMERA_ID[0], 1'b0};
+    /* verilator lint_on UNUSED */
 
 endmodule
 

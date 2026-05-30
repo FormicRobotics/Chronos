@@ -1,0 +1,49 @@
+# Chronos FPGA - Design Decisions (rebuild)
+
+Decisions locked for the MIPI subsystem rebuild. See `.cursor/plans/chronos_mipi_rebuild_*.plan.md`.
+
+## Sensor / data point
+- Sensor: Leopard Imaging LI-OV9281-MIPI (OV9281). 1280x800, 10-bit RAW mono, 2 data lanes.
+- Link rate: 800 Mbps/lane (GEAR=8 -> byte clock 100 MHz). Confirmed by datasheet (up to 120fps).
+- Design fps target: CONFIRMED 30 fps per camera (4 cams @ 30 fps). Comfortable on the 2-lane TX
+  (~1.6 Gbps aggregate, see bandwidth note). The RTL is rate-agnostic; the ceiling is the 2-lane TX,
+  not the fabric.
+- Frame rate is set by the FPGA FSIN trigger, NOT by the sensor free-running. All 4 cameras run in
+  external-trigger (slave) mode and expose on each FSIN pulse, so the FPGA's trigger period defines the
+  synchronized 30 fps. Defaults are wired for this:
+    * `config_regs` powers up `frame_rate = 30` (REG 0x01) and `pulse_width = 2000` cyc (~10 us @200 MHz).
+    * `trigger_generator` resets to a 30 fps period (`compute_period(30)`), single physical FSIN pin
+      (R9) fanned out on the PCB to all cameras + IMU + sync header.
+  => 30 fps needs no RTL change; the OV9281 init table just has to put the sensor in external-trigger
+  mode with VTS large enough for the 30 fps exposure window.
+
+## Bandwidth ceiling (hard limit)
+- Input at 120fps: 4 x 2 lanes x 800 Mbps = 6.4 Gbps.
+- TX to Jetson = 2 lanes; D-PHY ~2.5 Gbps/lane => ~5 Gbps ceiling.
+- => 4 cams @ 120fps simultaneously does NOT fit a 2-lane TX. Chosen design point 4 cams @ 30 fps
+  (~1.6 Gbps total) sits comfortably below the ceiling with ample margin. Not a firmware bug; a physical
+  link limit that the 30 fps target avoids entirely.
+
+## D-PHY allocation (2 hard blocks available)
+- Cameras (4x RX): SOFT MIPI D-PHY (lscc_mipi_dphy_soft_rx, GDDR/ECLK based). Uniform, no hard-DPHY
+  scarcity. 800 Mbps/lane, GEAR=8.
+- TX to Jetson (1x): HARD MIPI D-PHY (lscc DPHY primitive). Highest, most timing-critical link.
+- Leaves 1 hard D-PHY spare.
+- ACTION (hardware): confirm camera pin pairs are on soft-DPHY-capable (true LVDS/generic-DDR) banks
+  and the TX pair on a hard-DPHY site, against the LIFCL-40 datasheet. The PDC currently tags all as
+  MIPI_DPHY (hard); soft camera lanes must use the soft I/O type the IP emits (LVDS + IDDRX4).
+
+## Camera configuration ownership
+- FPGA-driven OV9281 init over per-camera SCCB (I2C master in fabric), triggered after cam reset release.
+- Rationale: each camera has its own dedicated I2C bus to the FPGA (cam_scl/sda[3:0]); the Jetson host
+  bus is separate (host_i2c). FPGA owning camera init keeps cameras streaming independent of host driver
+  bring-up. Init table lives in `ov9281_init_rom` (editable).
+
+## Word alignment (soft RX)
+- The soft RX IP does not provide SoT/byte-enable; IDDRX4 ALIGNWD is tied low. Therefore fabric must do
+  per-lane byte alignment by detecting the CSI-2 sync byte 0xB8 across bit offsets, then lock the offset.
+  Implemented in `csi2_rx` / `dphy_word_aligner`.
+
+## Toolchain note
+- Build in Radiant 2.0 SP1 (ES silicon). The design is SystemVerilog; use Synplify Pro synthesis in
+  Radiant 2.0 SP1 (LSE in 2.0 SP1 lacks full SV). The Lattice MIPI IP RTL is Verilog and works with both.

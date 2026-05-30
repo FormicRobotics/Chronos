@@ -1,392 +1,301 @@
-//------------------------------------------------------------------------------
-// CSI-2 Receiver Controller
-// Implements MIPI CSI-2 packet parsing with D-PHY interface
-//------------------------------------------------------------------------------
+//==============================================================================
+// csi2_rx - MIPI CSI-2 receiver (soft D-PHY PPI -> packet token stream)
+//==============================================================================
+// Pipeline: pads -> mipi_dphy_rx (soft) -> per-lane 0xB8 word aligner -> packet
+// FSM. 2 data lanes, GEAR=8 => 2 bytes per recovered byte clock
+// (lane0 = even byte, lane1 = odd byte in CSI-2 transmission order).
+//
+// Output is a token stream in the recovered byte-clock domain (byte_clk_o),
+// identical in shape to the csi2_tx sink so the frame_buffer can store it and
+// the arbiter can replay it verbatim:
+//   * sop_valid : one beat per packet, with {vc,dt,wc,short} + fs/fe/ls/le
+//   * pay_valid : payload words (long packets), pay_last marks the final word
+//
+// Fixes vs old design: real IP D-PHY (not a placeholder), correct 4-byte header
+// assembly, ECC over the true {WC,VC,DT} bits, and a CRC chained byte-by-byte
+// in order across both lanes (old for-loop kept only the last lane).
+//==============================================================================
 
 `timescale 1ns / 1ps
+`default_nettype none
+
+import csi2_pkg::*;
 
 module csi2_rx #(
-    parameter NUM_LANES  = 2,
-    parameter CAMERA_ID  = 0
+    parameter int NUM_LANES   = 2,
+    parameter int CAMERA_ID   = 0,
+    parameter int GEAR        = 8,
+    parameter bit BIT_REVERSE = 1'b0   // set if IDDRX4 captures MSB-first
 )(
-    // Clocks and reset
-    input  logic        clk_byte,           // Byte clock from D-PHY
-    input  logic        clk_sys,            // System clock
-    input  logic        rst_n,
-    
-    // D-PHY Interface (directly connected to CrossLink-NX hard D-PHY)
-    input  logic        dphy_clk_p,
-    input  logic        dphy_clk_n,
-    input  logic [NUM_LANES-1:0] dphy_data_p,
-    input  logic [NUM_LANES-1:0] dphy_data_n,
-    
-    // Packet Output Interface
-    output logic        pkt_valid,
-    output logic [31:0] pkt_data,
-    output logic [5:0]  pkt_type,           // Data Type
-    output logic [15:0] pkt_wc,             // Word Count
-    output logic        frame_start,
-    output logic        frame_end,
-    output logic        line_start,
-    output logic        line_end,
-    output logic        error               // CRC/ECC error flag
+    input  wire        clk_sys,        // reference clock for D-PHY GDDR calibration
+    input  wire        rst_n,
+    input  wire        pll_locked,     // start D-PHY calibration
+    input  wire        enable,         // host: enable this camera RX
+
+    // D-PHY pads
+    inout  wire        dphy_clk_p,
+    inout  wire        dphy_clk_n,
+    inout  wire [NUM_LANES-1:0] dphy_data_p,
+    inout  wire [NUM_LANES-1:0] dphy_data_n,
+
+    // recovered byte clock (write clock of the async frame buffer)
+    output wire        byte_clk_o,
+
+    // Packet token stream (byte_clk_o domain)
+    output logic        sop_valid,
+    output logic        sop_short,
+    output logic [1:0]  sop_vc,
+    output logic [5:0]  sop_dt,
+    output logic [15:0] sop_wc,
+    output logic        sop_fs,
+    output logic        sop_fe,
+    output logic        sop_ls,
+    output logic        sop_le,
+    output logic        pay_valid,
+    output logic [31:0] pay_data,
+    output logic        pay_last,
+    output logic        error
 );
 
     //--------------------------------------------------------------------------
-    // CSI-2 Data Types (subset for OV9281)
+    // Soft D-PHY RX IP
     //--------------------------------------------------------------------------
-    
-    localparam DT_FRAME_START  = 6'h00;
-    localparam DT_FRAME_END    = 6'h01;
-    localparam DT_LINE_START   = 6'h02;
-    localparam DT_LINE_END     = 6'h03;
-    localparam DT_RAW8         = 6'h2A;
-    localparam DT_RAW10        = 6'h2B;
-    localparam DT_RAW12        = 6'h2C;
-    
-    //--------------------------------------------------------------------------
-    // State Machine States
-    //--------------------------------------------------------------------------
-    
-    typedef enum logic [3:0] {
-        ST_IDLE,
-        ST_SYNC,
-        ST_HEADER,
-        ST_PAYLOAD,
-        ST_CRC,
-        ST_ERROR
-    } state_t;
-    
-    state_t state, next_state;
-    
-    //--------------------------------------------------------------------------
-    // Internal Signals
-    //--------------------------------------------------------------------------
-    
-    // D-PHY deserialized data (from hard IP)
-    logic [7:0] lane_data [NUM_LANES-1:0];
-    logic       lane_valid;
-    logic       sync_detected;
-    
-    // Packet parsing
-    logic [31:0] packet_header;
-    logic [1:0]  pkt_vc;                    // Virtual Channel (from header)
-    logic [5:0]  pkt_dt;                    // Data Type
-    logic [15:0] word_count;
-    logic [7:0]  ecc_received;
-    logic [7:0]  ecc_calculated;
-    logic        ecc_valid;
-    
-    // Payload handling
-    logic [15:0] byte_count;
-    logic [31:0] payload_data;
-    logic        payload_valid;
-    
-    // CRC
-    logic [15:0] crc_received;
-    logic [15:0] crc_calculated;
-    logic        crc_valid;
-    
-    // Synchronization
-    logic [7:0]  sync_pattern [NUM_LANES-1:0];
-    localparam   SYNC_BYTE = 8'hB8;         // CSI-2 sync byte
-    
-    //--------------------------------------------------------------------------
-    // D-PHY Interface (simplified - actual implementation uses hard IP)
-    // In CrossLink-NX, this would connect to the DPHY_RX hard IP block
-    //--------------------------------------------------------------------------
-    
-    // This is a behavioral model - actual implementation uses Lattice DPHY IP
-    dphy_rx_wrapper #(
-        .NUM_LANES(NUM_LANES)
+    wire                      byte_clk;
+    wire [NUM_LANES*GEAR-1:0] hs_data;     // {lane1, lane0}
+    wire                      dphy_ready;
+    wire                      rst = ~rst_n;
+
+    assign byte_clk_o = byte_clk;
+
+    mipi_dphy_rx #(
+        .NUM_LANE (NUM_LANES),
+        .GEAR     (GEAR)
     ) u_dphy_rx (
-        .clk_byte       (clk_byte),
-        .rst_n          (rst_n),
-        .dphy_clk_p     (dphy_clk_p),
-        .dphy_clk_n     (dphy_clk_n),
-        .dphy_data_p    (dphy_data_p),
-        .dphy_data_n    (dphy_data_n),
-        .lane_data      (lane_data),
-        .lane_valid     (lane_valid),
-        .sync_detected  (sync_detected)
+        .clk_ref_i  (clk_sys),
+        .rst_i      (rst),
+        .pll_lock_i (pll_locked),
+        .hs_rx_en_i (enable),
+        .byte_clk_o (byte_clk),
+        .hs_data_o  (hs_data),
+        .ready_o    (dphy_ready),
+        .clk_p_io   (dphy_clk_p),
+        .clk_n_io   (dphy_clk_n),
+        .data_p_io  (dphy_data_p),
+        .data_n_io  (dphy_data_n)
     );
-    
-    //--------------------------------------------------------------------------
-    // State Machine
-    //--------------------------------------------------------------------------
-    
-    always_ff @(posedge clk_byte or negedge rst_n) begin
-        if (!rst_n)
-            state <= ST_IDLE;
-        else
-            state <= next_state;
+
+    // reset into byte-clock domain (released after IP calibration)
+    logic brst_n_meta, brst_n;
+    always_ff @(posedge byte_clk or negedge rst_n) begin
+        if (!rst_n) begin brst_n_meta <= 1'b0; brst_n <= 1'b0; end
+        else        begin brst_n_meta <= dphy_ready; brst_n <= brst_n_meta; end
     end
-    
+
+    //--------------------------------------------------------------------------
+    // Raw lane bytes (optionally bit-reversed to match IDDRX4 bit order)
+    //--------------------------------------------------------------------------
+    logic [7:0] raw [NUM_LANES];
     always_comb begin
-        next_state = state;
-        
-        case (state)
-            ST_IDLE: begin
-                if (sync_detected)
-                    next_state = ST_SYNC;
-            end
-            
-            ST_SYNC: begin
-                if (lane_valid)
-                    next_state = ST_HEADER;
-            end
-            
-            ST_HEADER: begin
-                if (lane_valid) begin
-                    if (ecc_valid)
-                        next_state = (word_count > 0) ? ST_PAYLOAD : ST_IDLE;
-                    else
-                        next_state = ST_ERROR;
+        for (int l = 0; l < NUM_LANES; l++) begin
+            logic [7:0] b;
+            b = hs_data[l*GEAR +: 8];
+            if (BIT_REVERSE)
+                for (int k = 0; k < 8; k++) raw[l][k] = b[7-k];
+            else
+                raw[l] = b;
+        end
+    end
+
+    //--------------------------------------------------------------------------
+    // Per-lane word aligner: detect 0xB8 across the 8 bit offsets, lock the
+    // offset, then emit one aligned byte/cycle. hist holds the previous cycle's
+    // bits so an aligned byte can straddle the cycle boundary.
+    //--------------------------------------------------------------------------
+    logic [7:0] hist [NUM_LANES];
+    logic [2:0] shift [NUM_LANES];
+    logic       locked [NUM_LANES];
+    logic [7:0] aligned [NUM_LANES];
+    logic       all_locked;
+
+    always_comb begin
+        for (int l = 0; l < NUM_LANES; l++) begin
+            logic [15:0] win;
+            win        = {raw[l], hist[l]};
+            aligned[l] = win[shift[l] +: 8];
+        end
+    end
+
+    always_comb begin
+        all_locked = 1'b1;
+        for (int l = 0; l < NUM_LANES; l++)
+            all_locked &= locked[l];
+    end
+
+    genvar gl;
+    generate
+        for (gl = 0; gl < NUM_LANES; gl++) begin : g_align
+            always_ff @(posedge byte_clk or negedge brst_n) begin
+                if (!brst_n) begin
+                    hist[gl]   <= 8'h00;
+                    shift[gl]  <= 3'd0;
+                    locked[gl] <= 1'b0;
+                end else begin
+                    hist[gl] <= raw[gl];
+                    if (!locked[gl]) begin
+                        logic [15:0] win;
+                        win = {raw[gl], hist[gl]};
+                        for (int s = 0; s < 8; s++)
+                            if (win[s +: 8] == SYNC_BYTE) begin
+                                shift[gl]  <= s[2:0];
+                                locked[gl] <= 1'b1;
+                            end
+                    end
                 end
             end
-            
-            ST_PAYLOAD: begin
-                if (byte_count >= word_count)
-                    next_state = ST_CRC;
-            end
-            
-            ST_CRC: begin
-                if (crc_valid)
-                    next_state = ST_IDLE;
-                else
-                    next_state = ST_ERROR;
-            end
-            
-            ST_ERROR: begin
-                next_state = ST_IDLE;
-            end
-            
-            default: next_state = ST_IDLE;
-        endcase
-    end
-    
-    //--------------------------------------------------------------------------
-    // Packet Header Parsing
-    //--------------------------------------------------------------------------
-    
-    // Assemble 32-bit header from lane data
-    always_ff @(posedge clk_byte or negedge rst_n) begin
-        if (!rst_n) begin
-            packet_header <= 32'h0;
-        end else if (state == ST_HEADER && lane_valid) begin
-            // CSI-2 header: [VC:2][DT:6][WC:16][ECC:8]
-            packet_header <= {lane_data[1], lane_data[0], 
-                              lane_data[1], lane_data[0]};
         end
-    end
-    
-    // Extract fields from header
-    assign pkt_vc        = packet_header[7:6];
-    assign pkt_dt        = packet_header[5:0];
-    assign word_count    = packet_header[23:8];
-    assign ecc_received  = packet_header[31:24];
-    
+    endgenerate
+
     //--------------------------------------------------------------------------
-    // ECC Calculation (Hamming code for CSI-2)
+    // Packet FSM
     //--------------------------------------------------------------------------
-    
-    function automatic logic [7:0] calc_ecc(input logic [23:0] data);
-        logic [7:0] ecc;
-        // CSI-2 ECC polynomial calculation
-        ecc[0] = data[0]  ^ data[1]  ^ data[2]  ^ data[4]  ^ data[5]  ^ 
-                 data[7]  ^ data[10] ^ data[11] ^ data[13] ^ data[16] ^ 
-                 data[20] ^ data[21] ^ data[22] ^ data[23];
-        ecc[1] = data[0]  ^ data[1]  ^ data[3]  ^ data[4]  ^ data[6]  ^ 
-                 data[8]  ^ data[10] ^ data[12] ^ data[14] ^ data[17] ^ 
-                 data[20] ^ data[21] ^ data[22] ^ data[23];
-        ecc[2] = data[0]  ^ data[2]  ^ data[3]  ^ data[5]  ^ data[6]  ^ 
-                 data[9]  ^ data[11] ^ data[12] ^ data[15] ^ data[18] ^ 
-                 data[20] ^ data[21] ^ data[22];
-        ecc[3] = data[1]  ^ data[2]  ^ data[3]  ^ data[7]  ^ data[8]  ^ 
-                 data[9]  ^ data[13] ^ data[14] ^ data[15] ^ data[19] ^ 
-                 data[20] ^ data[21] ^ data[23];
-        ecc[4] = data[4]  ^ data[5]  ^ data[6]  ^ data[7]  ^ data[8]  ^ 
-                 data[9]  ^ data[16] ^ data[17] ^ data[18] ^ data[19] ^ 
-                 data[20] ^ data[22] ^ data[23];
-        ecc[5] = data[10] ^ data[11] ^ data[12] ^ data[13] ^ data[14] ^ 
-                 data[15] ^ data[16] ^ data[17] ^ data[18] ^ data[19] ^ 
-                 data[21] ^ data[22] ^ data[23];
-        ecc[6] = 1'b0;
-        ecc[7] = 1'b0;
-        return ecc;
-    endfunction
-    
-    assign ecc_calculated = calc_ecc(packet_header[23:0]);
-    assign ecc_valid      = (ecc_received == ecc_calculated);
-    
-    //--------------------------------------------------------------------------
-    // Payload Processing
-    //--------------------------------------------------------------------------
-    
-    always_ff @(posedge clk_byte or negedge rst_n) begin
-        if (!rst_n) begin
-            byte_count    <= 16'h0;
-            payload_data  <= 32'h0;
-            payload_valid <= 1'b0;
-        end else begin
-            payload_valid <= 1'b0;
-            
-            if (state == ST_HEADER) begin
-                byte_count <= 16'h0;
-            end else if (state == ST_PAYLOAD && lane_valid) begin
-                // Accumulate bytes into 32-bit word
-                byte_count <= byte_count + NUM_LANES;
-                payload_data <= {lane_data[1], lane_data[0], 
-                                 payload_data[31:16]};
-                
-                if (byte_count[1:0] == 2'b10)
-                    payload_valid <= 1'b1;
-            end
-        end
-    end
-    
-    //--------------------------------------------------------------------------
-    // CRC-16 Calculation
-    //--------------------------------------------------------------------------
-    
+    typedef enum logic [2:0] {ST_SYNC, ST_HDR1, ST_HDR2, ST_PAY, ST_CRC} state_t;
+    state_t state;
+
+    logic [7:0]  b_even, b_odd;
+    assign b_even = aligned[0];
+    assign b_odd  = (NUM_LANES > 1) ? aligned[1] : 8'h00;
+
+    logic [5:0]  dt;
+    logic [1:0]  vc;
+    logic [7:0]  wc_lo;
     logic [15:0] crc_reg;
-    
-    function automatic logic [15:0] crc16_ccitt(
-        input logic [15:0] crc_in,
-        input logic [7:0]  data
-    );
-        logic [15:0] crc_out;
-        logic [7:0] d;
-        d = data;
-        
-        crc_out[0]  = crc_in[8]  ^ crc_in[12] ^ d[0] ^ d[4];
-        crc_out[1]  = crc_in[9]  ^ crc_in[13] ^ d[1] ^ d[5];
-        crc_out[2]  = crc_in[10] ^ crc_in[14] ^ d[2] ^ d[6];
-        crc_out[3]  = crc_in[11] ^ crc_in[15] ^ d[3] ^ d[7];
-        crc_out[4]  = crc_in[12] ^ d[4];
-        crc_out[5]  = crc_in[8]  ^ crc_in[12] ^ crc_in[13] ^ d[0] ^ d[4] ^ d[5];
-        crc_out[6]  = crc_in[9]  ^ crc_in[13] ^ crc_in[14] ^ d[1] ^ d[5] ^ d[6];
-        crc_out[7]  = crc_in[10] ^ crc_in[14] ^ crc_in[15] ^ d[2] ^ d[6] ^ d[7];
-        crc_out[8]  = crc_in[0]  ^ crc_in[11] ^ crc_in[15] ^ d[3] ^ d[7];
-        crc_out[9]  = crc_in[1]  ^ crc_in[12] ^ d[4];
-        crc_out[10] = crc_in[2]  ^ crc_in[13] ^ d[5];
-        crc_out[11] = crc_in[3]  ^ crc_in[14] ^ d[6];
-        crc_out[12] = crc_in[4]  ^ crc_in[8]  ^ crc_in[12] ^ crc_in[15] ^ 
-                      d[0] ^ d[4] ^ d[7];
-        crc_out[13] = crc_in[5]  ^ crc_in[9]  ^ crc_in[13] ^ d[1] ^ d[5];
-        crc_out[14] = crc_in[6]  ^ crc_in[10] ^ crc_in[14] ^ d[2] ^ d[6];
-        crc_out[15] = crc_in[7]  ^ crc_in[11] ^ crc_in[15] ^ d[3] ^ d[7];
-        
-        return crc_out;
-    endfunction
-    
-    always_ff @(posedge clk_byte or negedge rst_n) begin
-        if (!rst_n) begin
-            crc_reg <= 16'hFFFF;
+    logic [15:0] rem;
+    logic [1:0]  word_fill;
+    logic [31:0] word_acc;
+
+    always_ff @(posedge byte_clk or negedge brst_n) begin
+        if (!brst_n) begin
+            state     <= ST_SYNC;
+            dt <= 6'd0; vc <= 2'd0; wc_lo <= 8'd0;
+            crc_reg   <= 16'hFFFF;
+            rem       <= 16'd0;
+            word_fill <= 2'd0;
+            word_acc  <= 32'd0;
+            sop_valid <= 1'b0; sop_short <= 1'b0;
+            sop_vc <= 2'd0; sop_dt <= 6'd0; sop_wc <= 16'd0;
+            sop_fs <= 1'b0; sop_fe <= 1'b0; sop_ls <= 1'b0; sop_le <= 1'b0;
+            pay_valid <= 1'b0; pay_data <= 32'd0; pay_last <= 1'b0;
+            error     <= 1'b0;
         end else begin
-            if (state == ST_HEADER)
-                crc_reg <= 16'hFFFF;
-            else if (state == ST_PAYLOAD && lane_valid) begin
-                for (int i = 0; i < NUM_LANES; i++)
-                    crc_reg <= crc16_ccitt(crc_reg, lane_data[i]);
-            end
+            sop_valid <= 1'b0;
+            sop_fs <= 1'b0; sop_fe <= 1'b0; sop_ls <= 1'b0; sop_le <= 1'b0;
+            pay_valid <= 1'b0; pay_last <= 1'b0;
+            error     <= 1'b0;
+
+            unique case (state)
+                //--------------------------------------------------------------
+                ST_SYNC: begin
+                    word_fill <= 2'd0;
+                    crc_reg   <= 16'hFFFF;
+                    if (all_locked && (b_even == SYNC_BYTE))
+                        state <= ST_HDR1;
+                end
+                //--------------------------------------------------------------
+                ST_HDR1: begin
+                    dt    <= b_even[5:0];
+                    vc    <= b_even[7:6];
+                    wc_lo <= b_odd;
+                    state <= ST_HDR2;
+                end
+                //--------------------------------------------------------------
+                ST_HDR2: begin
+                    // B2 = wc_hi = b_even, B3 = ecc = b_odd
+                    logic [15:0] wc_full;
+                    logic        shortp;
+                    wc_full = {b_even, wc_lo};
+                    shortp  = is_short_packet(dt);
+                    if (calc_ecc({wc_full, vc, dt}) != b_odd) begin
+                        error <= 1'b1;
+                        state <= ST_SYNC;
+                    end else begin
+                        sop_valid <= 1'b1;
+                        sop_vc    <= vc;
+                        sop_dt    <= dt;
+                        sop_wc    <= wc_full;
+                        sop_short <= shortp;
+                        sop_fs    <= (dt == DT_FRAME_START);
+                        sop_fe    <= (dt == DT_FRAME_END);
+                        sop_ls    <= (dt == DT_LINE_START);
+                        sop_le    <= (dt == DT_LINE_END);
+                        if (shortp) begin
+                            state <= ST_SYNC;
+                        end else begin
+                            rem       <= wc_full;
+                            word_fill <= 2'd0;
+                            crc_reg   <= 16'hFFFF;
+                            state     <= ST_PAY;
+                        end
+                    end
+                end
+                //--------------------------------------------------------------
+                ST_PAY: begin
+                    logic [15:0] crc_t;
+                    logic [31:0] wacc;
+                    logic [1:0]  wf;
+                    logic        emit;
+                    logic [15:0] n;
+                    crc_t = crc_reg;
+                    wacc  = word_acc;
+                    wf    = word_fill;
+                    emit  = 1'b0;
+                    n     = (rem >= NUM_LANES[15:0]) ? NUM_LANES[15:0] : rem;
+
+                    // byte 0 (lane0, even)
+                    crc_t          = crc16_step(crc_t, b_even);
+                    wacc[wf*8 +: 8]= b_even;
+                    wf             = wf + 2'd1;
+                    if (wf == 2'd0) emit = 1'b1;
+                    // byte 1 (lane1, odd) when present
+                    if (n > 1) begin
+                        crc_t           = crc16_step(crc_t, b_odd);
+                        wacc[wf*8 +: 8] = b_odd;
+                        wf              = wf + 2'd1;
+                        if (wf == 2'd0) emit = 1'b1;
+                    end
+
+                    crc_reg   <= crc_t;
+                    word_acc  <= wacc;
+                    word_fill <= wf;
+
+                    if (rem <= NUM_LANES[15:0]) begin
+                        // final payload cycle: emit whatever we have, mark last
+                        pay_valid <= 1'b1;
+                        pay_data  <= wacc;
+                        pay_last  <= 1'b1;
+                        state     <= ST_CRC;
+                    end else begin
+                        rem <= rem - NUM_LANES[15:0];
+                        if (emit) begin
+                            pay_valid <= 1'b1;
+                            pay_data  <= wacc;
+                        end
+                    end
+                end
+                //--------------------------------------------------------------
+                ST_CRC: begin
+                    if ({b_odd, b_even} != crc_reg)
+                        error <= 1'b1;
+                    state <= ST_SYNC;
+                end
+                default: state <= ST_SYNC;
+            endcase
         end
     end
-    
-    assign crc_calculated = crc_reg;
-    assign crc_valid = (state == ST_CRC) && (crc_received == crc_calculated);
-    
-    //--------------------------------------------------------------------------
-    // Output Generation
-    //--------------------------------------------------------------------------
-    
-    // Clock domain crossing from clk_byte to clk_sys
-    logic        pkt_valid_sync;
-    logic [31:0] pkt_data_sync;
-    logic        fs_sync, fe_sync, ls_sync, le_sync;
-    logic        error_sync;
-    
-    // Detect short packet types
-    logic is_frame_start, is_frame_end, is_line_start, is_line_end;
-    
-    assign is_frame_start = (pkt_dt == DT_FRAME_START);
-    assign is_frame_end   = (pkt_dt == DT_FRAME_END);
-    assign is_line_start  = (pkt_dt == DT_LINE_START);
-    assign is_line_end    = (pkt_dt == DT_LINE_END);
-    
-    always_ff @(posedge clk_sys or negedge rst_n) begin
-        if (!rst_n) begin
-            pkt_valid   <= 1'b0;
-            pkt_data    <= 32'h0;
-            pkt_type    <= 6'h0;
-            pkt_wc      <= 16'h0;
-            frame_start <= 1'b0;
-            frame_end   <= 1'b0;
-            line_start  <= 1'b0;
-            line_end    <= 1'b0;
-            error       <= 1'b0;
-        end else begin
-            // Default: deassert pulses
-            frame_start <= 1'b0;
-            frame_end   <= 1'b0;
-            line_start  <= 1'b0;
-            line_end    <= 1'b0;
-            error       <= 1'b0;
-            
-            // Payload data output
-            pkt_valid   <= payload_valid;
-            pkt_data    <= payload_data;
-            pkt_type    <= pkt_dt;
-            pkt_wc      <= word_count;
-            
-            // Short packet indicators
-            if (state == ST_HEADER && lane_valid && ecc_valid) begin
-                frame_start <= is_frame_start;
-                frame_end   <= is_frame_end;
-                line_start  <= is_line_start;
-                line_end    <= is_line_end;
-            end
-            
-            // Error indication
-            if (state == ST_ERROR)
-                error <= 1'b1;
-        end
-    end
+
+    /* verilator lint_off UNUSED */
+    wire _unused = &{1'b0, CAMERA_ID[0], 1'b0};
+    /* verilator lint_on UNUSED */
 
 endmodule
 
-//------------------------------------------------------------------------------
-// D-PHY RX Wrapper (placeholder for CrossLink-NX hard IP)
-//------------------------------------------------------------------------------
-
-module dphy_rx_wrapper #(
-    parameter NUM_LANES = 2
-)(
-    input  logic        clk_byte,
-    input  logic        rst_n,
-    input  logic        dphy_clk_p,
-    input  logic        dphy_clk_n,
-    input  logic [NUM_LANES-1:0] dphy_data_p,
-    input  logic [NUM_LANES-1:0] dphy_data_n,
-    output logic [7:0]  lane_data [NUM_LANES-1:0],
-    output logic        lane_valid,
-    output logic        sync_detected
-);
-
-    // This module wraps the Lattice CrossLink-NX DPHY_RX hard IP
-    // Actual implementation instantiates the IP generated by Radiant
-    
-    // Placeholder behavioral model
-    always_ff @(posedge clk_byte or negedge rst_n) begin
-        if (!rst_n) begin
-            lane_valid    <= 1'b0;
-            sync_detected <= 1'b0;
-            for (int i = 0; i < NUM_LANES; i++)
-                lane_data[i] <= 8'h0;
-        end else begin
-            // Actual implementation connects to hard D-PHY IP
-            // This is just a placeholder
-        end
-    end
-
-endmodule
+`default_nettype wire

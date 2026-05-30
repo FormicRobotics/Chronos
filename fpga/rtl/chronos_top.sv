@@ -1,434 +1,313 @@
 //==============================================================================
-// Chronos Multi-Camera MIPI Synchronization System
-// Top-Level Module for Lattice CrossLink-NX FPGA
+// Chronos Multi-Camera MIPI Synchronisation System - top level
+// Target : Lattice CrossLink-NX  LIFCL-40 (ES)  HW_CHRONOS_R1
 //==============================================================================
+// Data plane (all CSI-2 packet token streams):
+//   pads -> csi2_rx[i] (soft D-PHY, recovers byte clk) -> frame_buffer[i]
+//        (async FWFT FIFO, recovered-byte-clk -> TX-byte-clk) -> tx_arbiter
+//        (4:1, VC = camera) -> csi2_tx (hard D-PHY) -> Jetson
 //
-// Copyright (C) 2025 Chronos Project
-// SPDX-License-Identifier: Proprietary
+// Clock domains:
+//   clk_sys        : control plane + soft-RX GDDR calibration ref + TX PLL ref
+//   rx_byte_clk[i] : per-camera recovered byte clock (frame_buffer write side)
+//   tx_byte_clk    : hard-TX byte clock (arbiter + frame_buffer read side)
 //
-// Description:
-//   This is the top-level module for the Chronos multi-camera synchronization
-//   system. It aggregates four MIPI CSI-2 camera streams into a single 2-lane
-//   output using virtual channel multiplexing, enabling all cameras to share
-//   one CSI port on the NVIDIA Jetson Orin NX.
-//
-// Features:
-//   - 4x CSI-2 RX controllers with hardened D-PHY IP
-//   - SRAM-based line buffers for stream aggregation
-//   - Virtual channel tagging (Camera 0-3 → VC 0-3)
-//   - PLL-based trigger generator with <100ns skew
-//   - I2C slave for host configuration
-//
-// Target Device:
-//   Lattice CrossLink-NX (LIFCL-40 or LIFCL-17)
-//
-// Tool Version:
-//   Lattice Radiant 3.2 or later
-//
-// Revision History:
-//   v1.0  2025-12-11  Initial release
-//
+// See fpga/DESIGN_DECISIONS.md and fpga/ip/README.md.
 //==============================================================================
 
 `timescale 1ns / 1ps
 `default_nettype none
 
+import csi2_pkg::*;
+
 module chronos_top #(
-    //--------------------------------------------------------------------------
-    // Design Parameters
-    //--------------------------------------------------------------------------
-    parameter int NUM_CAMERAS     = 4,          // Number of camera inputs
-    parameter int NUM_DATA_LANES  = 2,          // MIPI lanes per camera
-    parameter int PIXEL_WIDTH     = 10,         // Bits per pixel (RAW10)
-    parameter int VC_WIDTH        = 2,          // Virtual channel ID width
-    parameter int MAX_FRAME_RATE  = 120         // Maximum supported frame rate
+    parameter int NUM_CAMERAS    = 4,
+    parameter int NUM_DATA_LANES = 2,
+    parameter int MAX_FRAME_RATE = 120
 )(
-    //--------------------------------------------------------------------------
-    // System Interface
-    //--------------------------------------------------------------------------
-    input  wire         clk_ref,                // Reference clock input (25MHz)
-    input  wire         rst_n,                  // Active-low asynchronous reset
-    
-    //--------------------------------------------------------------------------
-    // CSI-2 Camera Inputs (4x 2-lane MIPI)
-    // Each camera uses differential clock and 2 data lanes
-    //--------------------------------------------------------------------------
-    input  wire  [NUM_CAMERAS-1:0]                     csi_rx_clk_p,   // Diff clock +
-    input  wire  [NUM_CAMERAS-1:0]                     csi_rx_clk_n,   // Diff clock -
-    input  wire  [NUM_CAMERAS-1:0][NUM_DATA_LANES-1:0] csi_rx_data_p,  // Data lanes +
-    input  wire  [NUM_CAMERAS-1:0][NUM_DATA_LANES-1:0] csi_rx_data_n,  // Data lanes -
-    
-    //--------------------------------------------------------------------------
-    // CSI-2 Output to Jetson (1x 2-lane MIPI)
-    // Aggregated stream with 4 virtual channels
-    //--------------------------------------------------------------------------
-    output logic        csi_tx_clk_p,           // Output diff clock +
-    output logic        csi_tx_clk_n,           // Output diff clock -
-    output logic [NUM_DATA_LANES-1:0] csi_tx_data_p,  // Output data +
-    output logic [NUM_DATA_LANES-1:0] csi_tx_data_n,  // Output data -
-    
-    //--------------------------------------------------------------------------
-    // Synchronization Trigger Outputs
-    // Low-skew signals to camera FSIN pins and IMU interrupt
-    //--------------------------------------------------------------------------
-    output logic [NUM_CAMERAS-1:0] cam_trigger, // Camera frame sync (FSIN)
-    output logic        imu_trigger,            // IMU sync interrupt
-    
-    //--------------------------------------------------------------------------
-    // Configuration Interface (I2C Slave)
-    // Host uses this to configure frame rate, exposure, etc.
-    //--------------------------------------------------------------------------
-    input  wire         i2c_scl,                // I2C clock
-    inout  wire         i2c_sda,                // I2C data (bidirectional)
-    
-    //--------------------------------------------------------------------------
-    // Status Indicators
-    //--------------------------------------------------------------------------
-    output logic [3:0]  led_status              // Debug/status LEDs
+    input  wire clk_ref_12m,
+    input  wire rst_n,
+
+    // Camera CSI-2 RX (four 2-lane MIPI inputs; D-PHY pads are bidirectional)
+    inout  wire [NUM_CAMERAS-1:0]                       csi_rx_clk_p,
+    inout  wire [NUM_CAMERAS-1:0]                       csi_rx_clk_n,
+    inout  wire [NUM_CAMERAS-1:0][NUM_DATA_LANES-1:0]   csi_rx_data_p,
+    inout  wire [NUM_CAMERAS-1:0][NUM_DATA_LANES-1:0]   csi_rx_data_n,
+
+    // CSI-2 TX to Jetson (single 2-lane MIPI output)
+    inout  wire                            csi_tx_clk_p,
+    inout  wire                            csi_tx_clk_n,
+    inout  wire [NUM_DATA_LANES-1:0]       csi_tx_data_p,
+    inout  wire [NUM_DATA_LANES-1:0]       csi_tx_data_n,
+
+    output logic                           fsin_fpga,
+    output logic                           cam_resetn,
+
+    inout  wire  [NUM_CAMERAS-1:0]         cam_scl,
+    inout  wire  [NUM_CAMERAS-1:0]         cam_sda,
+
+    input  wire                            host_i2c_scl,
+    inout  wire                            host_i2c_sda,
+
+    output logic                           imu_csn,
+    output logic                           imu_sclk,
+    output logic                           imu_mosi,
+    input  wire                            imu_miso,
+    input  wire                            imu_int1,
+
+    input  wire                            uart_rxd,
+    output logic                           uart_txd,
+
+    output logic [3:0]                     led_status
 );
 
     //==========================================================================
-    // Internal Signal Declarations
+    // Clocks & resets
     //==========================================================================
-    
-    //--------------------------------------------------------------------------
-    // Clock and Reset Signals
-    //--------------------------------------------------------------------------
-    logic clk_200m;                 // 200MHz system clock from PLL
-    logic clk_byte;                 // Byte clock for CSI-2 (variable)
-    logic pll_locked;               // PLL lock indicator
-    logic sys_rst_n;                // Synchronized system reset
-    
-    //--------------------------------------------------------------------------
-    // CSI-2 RX Packet Interfaces
-    // One set of signals per camera
-    //--------------------------------------------------------------------------
-    logic [NUM_CAMERAS-1:0]        rx_valid;        // Packet data valid
-    logic [NUM_CAMERAS-1:0]        rx_frame_start;  // Frame start short packet
-    logic [NUM_CAMERAS-1:0]        rx_frame_end;    // Frame end short packet
-    logic [NUM_CAMERAS-1:0]        rx_line_start;   // Line start marker
-    logic [NUM_CAMERAS-1:0]        rx_line_end;     // Line end marker
-    logic [NUM_CAMERAS-1:0][31:0]  rx_data;         // Packet payload (32-bit)
-    logic [NUM_CAMERAS-1:0][5:0]   rx_data_type;    // CSI-2 data type
-    logic [NUM_CAMERAS-1:0][15:0]  rx_word_count;   // Packet word count
-    logic [NUM_CAMERAS-1:0]        rx_error;        // CRC/ECC error flag
-    
-    //--------------------------------------------------------------------------
-    // Frame Buffer Interfaces
-    // Connect RX controllers to TX arbiter via line buffers
-    //--------------------------------------------------------------------------
-    logic [NUM_CAMERAS-1:0]        buf_wr_en;       // Write enable
-    logic [NUM_CAMERAS-1:0][31:0]  buf_wr_data;     // Write data
-    logic [NUM_CAMERAS-1:0]        buf_rd_en;       // Read enable
-    logic [NUM_CAMERAS-1:0][31:0]  buf_rd_data;     // Read data
-    logic [NUM_CAMERAS-1:0]        buf_empty;       // Buffer empty flag
-    logic [NUM_CAMERAS-1:0]        buf_full;        // Buffer full flag
-    logic [NUM_CAMERAS-1:0]        buf_overflow;    // Overflow error (sticky)
-    
-    //--------------------------------------------------------------------------
-    // CSI-2 TX Packet Interface
-    // Aggregated output stream
-    //--------------------------------------------------------------------------
-    logic        tx_ready;                  // TX ready to accept data
-    logic        tx_valid;                  // TX data valid
-    logic [31:0] tx_data;                   // TX payload data
-    logic [5:0]  tx_data_type;              // TX data type
-    logic [1:0]  tx_virtual_channel;        // TX virtual channel (0-3)
-    logic        tx_frame_start;            // TX frame start
-    logic        tx_frame_end;              // TX frame end
-    logic        tx_line_start;             // TX line start
-    logic        tx_line_end;               // TX line end
-    
-    //--------------------------------------------------------------------------
-    // Trigger Generator Signals
-    //--------------------------------------------------------------------------
-    logic        trigger_pulse;             // Master trigger pulse
-    logic [7:0]  frame_rate_cfg;            // Configured frame rate (fps)
-    logic        trigger_enable;            // Trigger enable from config
-    
-    //--------------------------------------------------------------------------
-    // Configuration Register Interface
-    //--------------------------------------------------------------------------
-    logic [7:0]  cfg_addr;                  // Register address
-    logic [7:0]  cfg_wdata;                 // Write data
-    logic [7:0]  cfg_rdata;                 // Read data
-    logic        cfg_wr_en;                 // Write enable
-    logic        cfg_rd_en;                 // Read enable
+    logic clk_sys, clk_byte_unused, pll_locked, sys_rst_n;
 
-    //==========================================================================
-    // Clock Generation (PLL)
-    //==========================================================================
-    // Generate system clocks from 25MHz reference:
-    //   - clk_200m: 200MHz for logic
-    //   - clk_byte: Variable byte clock for CSI-2 (depends on data rate)
-    //==========================================================================
-    
     chronos_pll u_pll (
-        .clk_ref     (clk_ref),
-        .rst_n       (rst_n),
-        .clk_200m    (clk_200m),
-        .clk_byte    (clk_byte),
-        .locked      (pll_locked)
+        .clk_ref (clk_ref_12m),
+        .rst_n   (rst_n),
+        .clk_sys (clk_sys),
+        .clk_byte(clk_byte_unused),
+        .locked  (pll_locked)
     );
-    
-    //--------------------------------------------------------------------------
-    // Reset Synchronizer
-    // Synchronizes async reset to system clock domain
-    //--------------------------------------------------------------------------
-    reset_sync u_reset_sync (
-        .clk         (clk_200m),
+
+    reset_sync u_reset_sys (
+        .clk         (clk_sys),
         .rst_n_async (rst_n & pll_locked),
         .rst_n_sync  (sys_rst_n)
     );
-    
+
     //==========================================================================
-    // CSI-2 RX Controllers (4 instances)
+    // Control plane (clk_sys): host I2C slave + register bank + trigger gen
     //==========================================================================
-    // Each controller handles one camera's MIPI CSI-2 input:
-    //   - Deserializes data from D-PHY
-    //   - Parses CSI-2 packets
-    //   - Extracts frame/line boundaries
-    //   - Validates CRC and ECC
-    //==========================================================================
-    
-    generate
-        for (genvar i = 0; i < NUM_CAMERAS; i++) begin : gen_csi_rx
-            csi2_rx #(
-                .NUM_LANES   (NUM_DATA_LANES),
-                .CAMERA_ID   (i)
-            ) u_csi2_rx (
-                // Clock and reset
-                .clk_byte    (clk_byte),
-                .clk_sys     (clk_200m),
-                .rst_n       (sys_rst_n),
-                
-                // D-PHY differential interface
-                .dphy_clk_p  (csi_rx_clk_p[i]),
-                .dphy_clk_n  (csi_rx_clk_n[i]),
-                .dphy_data_p (csi_rx_data_p[i]),
-                .dphy_data_n (csi_rx_data_n[i]),
-                
-                // Parsed packet interface
-                .pkt_valid   (rx_valid[i]),
-                .pkt_data    (rx_data[i]),
-                .pkt_type    (rx_data_type[i]),
-                .pkt_wc      (rx_word_count[i]),
-                .frame_start (rx_frame_start[i]),
-                .frame_end   (rx_frame_end[i]),
-                .line_start  (rx_line_start[i]),
-                .line_end    (rx_line_end[i]),
-                .error       (rx_error[i])
-            );
-        end
-    endgenerate
-    
-    //==========================================================================
-    // Frame Buffers (4 instances)
-    //==========================================================================
-    // SRAM-based line buffers for each camera:
-    //   - Absorbs timing variations between cameras
-    //   - Provides data for TX arbiter
-    //   - Tracks overflow conditions
-    //==========================================================================
-    
-    generate
-        for (genvar i = 0; i < NUM_CAMERAS; i++) begin : gen_frame_buf
-            frame_buffer #(
-                .DATA_WIDTH  (32),
-                .DEPTH       (4096),        // 16KB per camera
-                .CAMERA_ID   (i)
-            ) u_frame_buffer (
-                .clk         (clk_200m),
-                .rst_n       (sys_rst_n),
-                
-                // Write interface (from CSI-2 RX)
-                .wr_en       (rx_valid[i]),
-                .wr_data     (rx_data[i]),
-                .wr_frame_start (rx_frame_start[i]),
-                .wr_frame_end   (rx_frame_end[i]),
-                .wr_line_start  (rx_line_start[i]),
-                .wr_line_end    (rx_line_end[i]),
-                .wr_data_type   (rx_data_type[i]),
-                .wr_word_count  (rx_word_count[i]),
-                
-                // Read interface (to TX arbiter)
-                .rd_en       (buf_rd_en[i]),
-                .rd_data     (buf_rd_data[i]),
-                
-                // Status outputs
-                .empty       (buf_empty[i]),
-                .full        (buf_full[i]),
-                .overflow    (buf_overflow[i])
-            );
-        end
-    endgenerate
-    
-    //==========================================================================
-    // TX Arbiter and Virtual Channel Tagger
-    //==========================================================================
-    // Multiplexes 4 camera streams into single output:
-    //   - Round-robin scheduling between cameras
-    //   - Assigns virtual channel ID to each camera's data
-    //   - Maintains frame-level packet ordering
-    //==========================================================================
-    
-    tx_arbiter #(
-        .NUM_CAMERAS (NUM_CAMERAS)
-    ) u_tx_arbiter (
-        .clk         (clk_200m),
-        .rst_n       (sys_rst_n),
-        
-        // Buffer interfaces
-        .buf_empty   (buf_empty),
-        .buf_data    (buf_rd_data),
-        .buf_rd_en   (buf_rd_en),
-        
-        // TX interface
-        .tx_ready    (tx_ready),
-        .tx_valid    (tx_valid),
-        .tx_data     (tx_data),
-        .tx_vc       (tx_virtual_channel),
-        .tx_dt       (tx_data_type),
-        .tx_fs       (tx_frame_start),
-        .tx_fe       (tx_frame_end),
-        .tx_ls       (tx_line_start),
-        .tx_le       (tx_line_end)
+    logic [7:0]  cfg_addr, cfg_wdata, cfg_rdata;
+    logic        cfg_wr_en, cfg_rd_en;
+
+    i2c_slave #(.SLAVE_ADDR(7'h3C)) u_i2c_slave (
+        .clk(clk_sys), .rst_n(sys_rst_n),
+        .scl(host_i2c_scl), .sda(host_i2c_sda),
+        .reg_addr(cfg_addr), .reg_wdata(cfg_wdata), .reg_rdata(cfg_rdata),
+        .reg_wr_en(cfg_wr_en), .reg_rd_en(cfg_rd_en)
     );
-    
-    //==========================================================================
-    // CSI-2 TX Controller
-    //==========================================================================
-    // Generates MIPI CSI-2 output stream:
-    //   - Constructs packet headers with ECC
-    //   - Calculates and appends CRC
-    //   - Manages D-PHY state transitions (LP ↔ HS)
-    //==========================================================================
-    
-    csi2_tx #(
-        .NUM_LANES   (NUM_DATA_LANES)
-    ) u_csi2_tx (
-        .clk_byte    (clk_byte),
-        .clk_sys     (clk_200m),
-        .rst_n       (sys_rst_n),
-        
-        // Packet interface from arbiter
-        .pkt_valid   (tx_valid),
-        .pkt_ready   (tx_ready),
-        .pkt_data    (tx_data),
-        .pkt_type    (tx_data_type),
-        .pkt_vc      (tx_virtual_channel),
-        .frame_start (tx_frame_start),
-        .frame_end   (tx_frame_end),
-        .line_start  (tx_line_start),
-        .line_end    (tx_line_end),
-        
-        // D-PHY differential output
-        .dphy_clk_p  (csi_tx_clk_p),
-        .dphy_clk_n  (csi_tx_clk_n),
-        .dphy_data_p (csi_tx_data_p),
-        .dphy_data_n (csi_tx_data_n)
-    );
-    
-    //==========================================================================
-    // Trigger Generator
-    //==========================================================================
-    // Generates precision timing signals for synchronization:
-    //   - PLL-based timing for low jitter
-    //   - Configurable frame rate (1-120 fps)
-    //   - Low-skew distribution to all cameras and IMU
-    //   - Per-output delay adjustment for calibration
-    //==========================================================================
-    
+
+    logic        trigger_enable, soft_reset, trigger_pulse;
+    logic [7:0]  frame_rate_cfg;
+    logic [15:0] pulse_width_cfg;
+    logic [7:0]  trigger_delay_cfg [NUM_CAMERAS];
+    logic [3:0]  cam_enable;
+    logic [5:0]  output_data_type;
+
+    logic [3:0]  cam_sync_status;
+    logic [3:0]  rx_error_sys, buf_overflow_sys;
+    logic [31:0] frame_count_per_cam [NUM_CAMERAS];
+
     trigger_generator #(
-        .NUM_OUTPUTS     (NUM_CAMERAS + 1),     // 4 cameras + 1 IMU
-        .CLK_FREQ_HZ     (200_000_000),          // 200MHz system clock
-        .MAX_FRAME_RATE  (MAX_FRAME_RATE)        // Max 120fps
+        .NUM_OUTPUTS    (NUM_CAMERAS),
+        .CLK_FREQ_HZ    (200_000_000),
+        .MAX_FRAME_RATE (MAX_FRAME_RATE)
     ) u_trigger_gen (
-        .clk             (clk_200m),
-        .rst_n           (sys_rst_n),
-        
-        // Configuration from register bank
-        .enable          (trigger_enable),
-        .frame_rate      (frame_rate_cfg),
-        
-        // Trigger outputs
-        .trigger_pulse   (trigger_pulse),
-        .cam_trigger     (cam_trigger),
-        .imu_trigger     (imu_trigger)
+        .clk(clk_sys), .rst_n(sys_rst_n),
+        .enable(trigger_enable), .frame_rate(frame_rate_cfg),
+        .pulse_width(pulse_width_cfg), .trigger_delay(trigger_delay_cfg),
+        .trigger_pulse(trigger_pulse), .fsin_out(fsin_fpga)
     );
-    
-    //==========================================================================
-    // Configuration Interface (I2C Slave)
-    //==========================================================================
-    // Provides host access to configuration registers:
-    //   - Standard I2C slave at address 0x3C
-    //   - 8-bit register address space
-    //   - Read/write access to all config registers
-    //==========================================================================
-    
-    i2c_slave #(
-        .SLAVE_ADDR  (7'h3C)
-    ) u_i2c_slave (
-        .clk         (clk_200m),
-        .rst_n       (sys_rst_n),
-        
-        // I2C pins
-        .scl         (i2c_scl),
-        .sda         (i2c_sda),
-        
-        // Register interface
-        .reg_addr    (cfg_addr),
-        .reg_wdata   (cfg_wdata),
-        .reg_rdata   (cfg_rdata),
-        .reg_wr_en   (cfg_wr_en),
-        .reg_rd_en   (cfg_rd_en)
-    );
-    
-    //==========================================================================
-    // Configuration Register Bank
-    //==========================================================================
-    // Stores runtime configuration and provides status:
-    //   - Frame rate, pulse width, trigger delays
-    //   - Camera enable mask
-    //   - Error flags and frame counters
-    //   - Device ID and firmware version
-    //==========================================================================
-    
+
     config_regs u_config_regs (
-        .clk             (clk_200m),
-        .rst_n           (sys_rst_n),
-        
-        // Register interface from I2C slave
-        .addr            (cfg_addr),
-        .wdata           (cfg_wdata),
-        .rdata           (cfg_rdata),
-        .wr_en           (cfg_wr_en),
-        .rd_en           (cfg_rd_en),
-        
-        // Configuration outputs to other modules
-        .trigger_enable  (trigger_enable),
-        .frame_rate      (frame_rate_cfg),
-        
-        // Status inputs from other modules
-        .rx_error        (rx_error),
-        .buf_overflow    (buf_overflow),
-        .pll_locked      (pll_locked)
+        .clk(clk_sys), .rst_n(sys_rst_n),
+        .addr(cfg_addr), .wdata(cfg_wdata), .rdata(cfg_rdata),
+        .wr_en(cfg_wr_en), .rd_en(cfg_rd_en),
+        .trigger_enable(trigger_enable), .frame_rate(frame_rate_cfg),
+        .pulse_width(pulse_width_cfg), .trigger_delay(trigger_delay_cfg),
+        .soft_reset(soft_reset), .cam_enable(cam_enable),
+        .output_data_type(output_data_type),
+        .rx_error(rx_error_sys), .buf_overflow(buf_overflow_sys),
+        .pll_locked(pll_locked), .cam_sync_status(cam_sync_status),
+        .frame_count(frame_count_per_cam)
     );
-    
+
     //==========================================================================
-    // Status LED Assignment
+    // TX byte-clock domain reset (clock comes from the hard-TX IP)
     //==========================================================================
-    // Visual indicators for debugging:
-    //   LED[0]: PLL locked (should be ON after power-up)
-    //   LED[1]: Data activity (blinks when receiving)
-    //   LED[2]: Trigger activity (blinks at frame rate)
-    //   LED[3]: Error indicator (ON if any error)
+    wire tx_byte_clk;
+    wire tx_ready;
+    logic tx_rst_n;
+
+    reset_sync u_reset_tx (
+        .clk         (tx_byte_clk),
+        .rst_n_async (rst_n & tx_ready),
+        .rst_n_sync  (tx_rst_n)
+    );
+
     //==========================================================================
-    
+    // CSI-2 TX (hard D-PHY) + arbiter
+    //==========================================================================
+    logic        sop_valid, sop_ready, sop_short;
+    logic [1:0]  sop_vc;
+    logic [5:0]  sop_dt;
+    logic [15:0] sop_wc;
+    logic [31:0] pay_data;
+    logic        pay_valid, pay_ready;
+
+    csi2_tx #(.NUM_LANES(NUM_DATA_LANES)) u_csi2_tx (
+        .clk_ref(clk_sys), .rst_n(rst_n),
+        .clk_byte_o(tx_byte_clk), .tx_ready(tx_ready),
+        .sop_valid(sop_valid), .sop_ready(sop_ready),
+        .sop_vc(sop_vc), .sop_dt(sop_dt), .sop_wc(sop_wc), .sop_short(sop_short),
+        .pay_data(pay_data), .pay_valid(pay_valid), .pay_ready(pay_ready),
+        .dphy_clk_p(csi_tx_clk_p), .dphy_clk_n(csi_tx_clk_n),
+        .dphy_data_p(csi_tx_data_p), .dphy_data_n(csi_tx_data_n)
+    );
+
+    logic [NUM_CAMERAS-1:0]        buf_rd_valid, buf_rd_is_sop, buf_rd_last;
+    logic [NUM_CAMERAS-1:0][31:0]  buf_rd_data;
+    logic [NUM_CAMERAS-1:0]        buf_pkt_avail, buf_rd_en;
+
+    tx_arbiter #(.NUM_CAMERAS(NUM_CAMERAS)) u_tx_arbiter (
+        .clk(tx_byte_clk), .rst_n(tx_rst_n),
+        .buf_rd_valid(buf_rd_valid), .buf_rd_is_sop(buf_rd_is_sop),
+        .buf_rd_last(buf_rd_last), .buf_rd_data(buf_rd_data),
+        .buf_pkt_avail(buf_pkt_avail), .buf_rd_en(buf_rd_en),
+        .sop_valid(sop_valid), .sop_ready(sop_ready),
+        .sop_vc(sop_vc), .sop_dt(sop_dt), .sop_wc(sop_wc), .sop_short(sop_short),
+        .pay_data(pay_data), .pay_valid(pay_valid), .pay_ready(pay_ready)
+    );
+
+    //==========================================================================
+    // Per-camera RX + frame buffer + OV9281 config
+    //==========================================================================
+    wire [NUM_CAMERAS-1:0] rx_byte_clk;
+    wire [NUM_CAMERAS-1:0] rx_rst_n;
+    wire [NUM_CAMERAS-1:0] frame_pulse_sys;   // synced frame_start in clk_sys
+    wire [NUM_CAMERAS-1:0] cam_cfg_done;
+
+    generate
+        for (genvar i = 0; i < NUM_CAMERAS; i++) begin : gen_cam
+            // RX
+            logic        rx_sop_v, rx_sop_short, rx_sop_fs, rx_sop_fe, rx_sop_ls, rx_sop_le;
+            logic [1:0]  rx_sop_vc;
+            logic [5:0]  rx_sop_dt;
+            logic [15:0] rx_sop_wc;
+            logic        rx_pay_v, rx_pay_last, rx_err;
+            logic [31:0] rx_pay_data;
+
+            csi2_rx #(.NUM_LANES(NUM_DATA_LANES), .CAMERA_ID(i)) u_csi2_rx (
+                .clk_sys(clk_sys), .rst_n(rst_n), .pll_locked(pll_locked),
+                .enable(cam_enable[i]),
+                .dphy_clk_p(csi_rx_clk_p[i]), .dphy_clk_n(csi_rx_clk_n[i]),
+                .dphy_data_p(csi_rx_data_p[i]), .dphy_data_n(csi_rx_data_n[i]),
+                .byte_clk_o(rx_byte_clk[i]),
+                .sop_valid(rx_sop_v), .sop_short(rx_sop_short),
+                .sop_vc(rx_sop_vc), .sop_dt(rx_sop_dt), .sop_wc(rx_sop_wc),
+                .sop_fs(rx_sop_fs), .sop_fe(rx_sop_fe),
+                .sop_ls(rx_sop_ls), .sop_le(rx_sop_le),
+                .pay_valid(rx_pay_v), .pay_data(rx_pay_data), .pay_last(rx_pay_last),
+                .error(rx_err)
+            );
+
+            reset_sync u_rx_rst (
+                .clk(rx_byte_clk[i]), .rst_n_async(rst_n), .rst_n_sync(rx_rst_n[i])
+            );
+
+            // token write port
+            wire        wr_en    = rx_sop_v | rx_pay_v;
+            wire        wr_is_sop= rx_sop_v;
+            wire        wr_last  = rx_sop_v ? rx_sop_short : rx_pay_last;
+            wire [31:0] wr_data  = rx_sop_v ?
+                pack_sop(rx_sop_short, rx_sop_vc, rx_sop_dt, rx_sop_wc,
+                         rx_sop_fs, rx_sop_fe, rx_sop_ls, rx_sop_le)
+                : rx_pay_data;
+
+            wire fb_overflow;
+            frame_buffer #(.ADDR_WIDTH(11), .CAMERA_ID(i)) u_fb (
+                .wr_clk(rx_byte_clk[i]), .wr_rst_n(rx_rst_n[i]),
+                .wr_en(wr_en), .wr_is_sop(wr_is_sop), .wr_last(wr_last),
+                .wr_data(wr_data), .full(), .overflow(fb_overflow),
+                .rd_clk(tx_byte_clk), .rd_rst_n(tx_rst_n),
+                .rd_en(buf_rd_en[i]), .rd_valid(buf_rd_valid[i]),
+                .rd_is_sop(buf_rd_is_sop[i]), .rd_last(buf_rd_last[i]),
+                .rd_data(buf_rd_data[i]), .empty(), .pkt_avail(buf_pkt_avail[i])
+            );
+
+            // OV9281 SCCB configuration (per camera)
+            ov9281_init #(.CLK_HZ(200_000_000)) u_cam_cfg (
+                .clk(clk_sys), .rst_n(sys_rst_n),
+                .start(cam_resetn & cam_enable[i]),
+                .scl(cam_scl[i]), .sda(cam_sda[i]),
+                .cfg_done(cam_cfg_done[i]), .ack_error()
+            );
+
+            // status CDC into clk_sys
+            pulse_cdc u_fs_cdc (
+                .src_clk(rx_byte_clk[i]), .src_rst_n(rx_rst_n[i]), .src_pulse(rx_sop_fs),
+                .dst_clk(clk_sys), .dst_rst_n(sys_rst_n), .dst_pulse(frame_pulse_sys[i])
+            );
+            wire rx_err_sticky;
+            sticky_bit u_err_sticky (
+                .clk(rx_byte_clk[i]), .rst_n(rx_rst_n[i]), .set(rx_err), .q(rx_err_sticky)
+            );
+            bit_sync u_err_sync (.clk(clk_sys), .rst_n(sys_rst_n),
+                                 .d(rx_err_sticky), .q(rx_error_sys[i]));
+            bit_sync u_ovf_sync (.clk(clk_sys), .rst_n(sys_rst_n),
+                                 .d(fb_overflow),  .q(buf_overflow_sys[i]));
+
+            // frame counter (clk_sys)
+            always_ff @(posedge clk_sys or negedge sys_rst_n) begin
+                if (!sys_rst_n) frame_count_per_cam[i] <= '0;
+                else if (frame_pulse_sys[i]) frame_count_per_cam[i] <= frame_count_per_cam[i] + 1'b1;
+            end
+            assign cam_sync_status[i] = ~rx_error_sys[i] & ~buf_overflow_sys[i];
+        end
+    endgenerate
+
+    //==========================================================================
+    // Camera reset (shared, active-low). Hold in reset until enabled; OV9281
+    // wants >= 1 ms; the ov9281_init power-up delay covers SCCB start timing.
+    //==========================================================================
+    logic [19:0] cam_rst_timer;
+    wire         any_cam_enable = |cam_enable;
+    always_ff @(posedge clk_sys or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            cam_resetn    <= 1'b0;
+            cam_rst_timer <= 20'd0;
+        end else if (soft_reset || !any_cam_enable) begin
+            cam_resetn    <= 1'b0;
+            cam_rst_timer <= 20'd0;
+        end else if (cam_rst_timer != 20'hFFFFF) begin
+            cam_rst_timer <= cam_rst_timer + 1'b1;   // ~5 ms ramp before release
+        end else begin
+            cam_resetn    <= 1'b1;
+        end
+    end
+
+    //==========================================================================
+    // IMU SPI placeholder (real master is future work)
+    //==========================================================================
+    assign imu_csn  = 1'b1;
+    assign imu_sclk = 1'b0;
+    assign imu_mosi = 1'b0;
+    logic imu_int1_sync;
+    bit_sync u_imu_int (.clk(clk_sys), .rst_n(sys_rst_n), .d(imu_int1), .q(imu_int1_sync));
+
+    //==========================================================================
+    // Debug UART loopback placeholder
+    //==========================================================================
+    assign uart_txd = uart_rxd;
+
+    //==========================================================================
+    // Status LEDs (active-high via Q1..Q4)
+    //==========================================================================
     assign led_status[0] = pll_locked;
-    assign led_status[1] = |rx_valid;                       // Any camera active
-    assign led_status[2] = trigger_pulse;                   // Trigger activity
-    assign led_status[3] = |rx_error | |buf_overflow;       // Any error
+    assign led_status[1] = |frame_pulse_sys;
+    assign led_status[2] = trigger_pulse;
+    assign led_status[3] = (|rx_error_sys) | (|buf_overflow_sys);
+
+    /* verilator lint_off UNUSED */
+    wire _unused = &{1'b0, clk_byte_unused, output_data_type, imu_int1_sync,
+                     cam_cfg_done, 1'b0};
+    /* verilator lint_on UNUSED */
 
 endmodule
 

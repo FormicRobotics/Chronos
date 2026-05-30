@@ -1,285 +1,123 @@
-//------------------------------------------------------------------------------
-// TX Arbiter - Multiplexes 4 camera streams with Virtual Channel tagging
-// Round-robin arbitration with frame-level priority
-//------------------------------------------------------------------------------
+//==============================================================================
+// tx_arbiter - round-robin 4:1 CSI-2 packet mux with virtual-channel tagging
+//==============================================================================
+// Runs in the TX byte-clock domain. Drains per-camera frame_buffer token
+// streams (FWFT) and replays whole packets into the csi2_tx sink, tagging each
+// with VC = camera index. A camera is only selected once its frame_buffer holds
+// a COMPLETE packet (pkt_avail), so the TX never starts a packet it cannot
+// finish (no mid-HS underflow).
+//
+// Rewrite vs old design: works on the FWFT token stream (old code read stale
+// metadata at ST_SELECT before data was valid), and there is no byte/word-count
+// bookkeeping to get wrong -- the packet boundary comes from the token 'last'
+// flag produced by csi2_rx.
+//==============================================================================
 
 `timescale 1ns / 1ps
+`default_nettype none
+
+import csi2_pkg::*;
 
 module tx_arbiter #(
-    parameter NUM_CAMERAS = 4,
-    parameter DATA_WIDTH  = 32
+    parameter int NUM_CAMERAS = 4
 )(
-    input  logic                    clk,
-    input  logic                    rst_n,
-    
-    // Buffer interfaces (from frame_buffers)
-    input  logic [NUM_CAMERAS-1:0]  buf_empty,
-    input  logic [NUM_CAMERAS-1:0][DATA_WIDTH-1:0] buf_data,
-    input  logic [NUM_CAMERAS-1:0]  buf_frame_start,
-    input  logic [NUM_CAMERAS-1:0]  buf_frame_end,
-    input  logic [NUM_CAMERAS-1:0]  buf_line_start,
-    input  logic [NUM_CAMERAS-1:0]  buf_line_end,
-    input  logic [NUM_CAMERAS-1:0][5:0]  buf_data_type,
-    input  logic [NUM_CAMERAS-1:0][15:0] buf_word_count,
-    input  logic [NUM_CAMERAS-1:0]  buf_valid,
-    output logic [NUM_CAMERAS-1:0]  buf_rd_en,
-    
-    // TX interface (to CSI-2 TX)
-    input  logic                    tx_ready,
-    output logic                    tx_valid,
-    output logic [DATA_WIDTH-1:0]   tx_data,
-    output logic [1:0]              tx_vc,          // Virtual Channel (0-3)
-    output logic [5:0]              tx_dt,          // Data Type
-    output logic [15:0]             tx_wc,          // Word Count
-    output logic                    tx_fs,          // Frame Start
-    output logic                    tx_fe,          // Frame End
-    output logic                    tx_ls,          // Line Start
-    output logic                    tx_le           // Line End
+    input  wire        clk,            // TX byte clock
+    input  wire        rst_n,
+
+    // Per-camera frame_buffer read interfaces (FWFT token stream)
+    input  wire [NUM_CAMERAS-1:0]        buf_rd_valid,
+    input  wire [NUM_CAMERAS-1:0]        buf_rd_is_sop,
+    input  wire [NUM_CAMERAS-1:0]        buf_rd_last,
+    input  wire [NUM_CAMERAS-1:0][31:0]  buf_rd_data,
+    input  wire [NUM_CAMERAS-1:0]        buf_pkt_avail,
+    output logic [NUM_CAMERAS-1:0]       buf_rd_en,
+
+    // csi2_tx packet sink
+    output logic        sop_valid,
+    input  wire         sop_ready,
+    output logic [1:0]  sop_vc,
+    output logic [5:0]  sop_dt,
+    output logic [15:0] sop_wc,
+    output logic        sop_short,
+    output logic [31:0] pay_data,
+    output logic        pay_valid,
+    input  wire         pay_ready
 );
 
-    //--------------------------------------------------------------------------
-    // State Machine
-    //--------------------------------------------------------------------------
-    
-    typedef enum logic [2:0] {
-        ST_IDLE,
-        ST_SELECT,
-        ST_SEND_HEADER,
-        ST_SEND_PAYLOAD,
-        ST_SEND_FOOTER,
-        ST_NEXT
-    } state_t;
-    
-    state_t state, next_state;
-    
-    //--------------------------------------------------------------------------
-    // Internal Signals
-    //--------------------------------------------------------------------------
-    
-    // Arbiter state
-    logic [1:0] current_cam;            // Currently selected camera (0-3)
-    logic [1:0] next_cam;
-    logic [NUM_CAMERAS-1:0] cam_ready;  // Cameras with data available
-    logic [NUM_CAMERAS-1:0] cam_grant;
-    
-    // Packet tracking
-    logic in_frame [NUM_CAMERAS-1:0];   // Currently receiving frame
-    logic [15:0] remaining_bytes;
-    
-    // Selected camera data (registered)
-    logic [DATA_WIDTH-1:0] sel_data;
-    logic [5:0]  sel_dt;
-    logic [15:0] sel_wc;
-    logic        sel_fs, sel_fe, sel_ls, sel_le;
-    logic        sel_valid;
-    
-    //--------------------------------------------------------------------------
-    // Camera Ready Detection
-    //--------------------------------------------------------------------------
-    
-    assign cam_ready = ~buf_empty;
-    
-    //--------------------------------------------------------------------------
-    // Round-Robin Arbitration
-    //--------------------------------------------------------------------------
-    
-    // Priority encoder with round-robin wrap
+    localparam int CW = (NUM_CAMERAS <= 1) ? 1 : $clog2(NUM_CAMERAS);
+
+    typedef enum logic [1:0] {ST_SEL, ST_SOP, ST_PAY} state_t;
+    state_t state;
+
+    logic [CW-1:0] cur, nxt;
+
+    // round-robin next camera with a complete packet whose head is a SOP
     always_comb begin
-        next_cam = current_cam;
-        
-        // Check cameras starting from next one after current
-        for (int i = 0; i < NUM_CAMERAS; i++) begin
-            logic [1:0] check_cam;
-            check_cam = (current_cam + 1 + i) % NUM_CAMERAS;
-            if (cam_ready[check_cam]) begin
-                next_cam = check_cam;
+        nxt = cur;
+        for (int i = 1; i <= NUM_CAMERAS; i++) begin
+            logic [CW-1:0] c;
+            c = (cur + i[CW-1:0]);
+            if (c >= NUM_CAMERAS[CW-1:0]) c = c - NUM_CAMERAS[CW-1:0];
+            if (buf_pkt_avail[c] && buf_rd_valid[c] && buf_rd_is_sop[c]) begin
+                nxt = c;
                 break;
             end
         end
     end
-    
-    // Grant generation
-    always_comb begin
-        cam_grant = '0;
-        cam_grant[current_cam] = 1'b1;
-    end
-    
-    //--------------------------------------------------------------------------
-    // State Machine
-    //--------------------------------------------------------------------------
-    
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            state <= ST_IDLE;
-        else
-            state <= next_state;
-    end
-    
-    always_comb begin
-        next_state = state;
-        
-        case (state)
-            ST_IDLE: begin
-                if (|cam_ready)
-                    next_state = ST_SELECT;
-            end
-            
-            ST_SELECT: begin
-                next_state = ST_SEND_HEADER;
-            end
-            
-            ST_SEND_HEADER: begin
-                if (tx_ready)
-                    next_state = (sel_wc > 0) ? ST_SEND_PAYLOAD : ST_NEXT;
-            end
-            
-            ST_SEND_PAYLOAD: begin
-                if (tx_ready && remaining_bytes == 0)
-                    next_state = ST_SEND_FOOTER;
-            end
-            
-            ST_SEND_FOOTER: begin
-                if (tx_ready)
-                    next_state = ST_NEXT;
-            end
-            
-            ST_NEXT: begin
-                if (|cam_ready)
-                    next_state = ST_SELECT;
-                else
-                    next_state = ST_IDLE;
-            end
-            
-            default: next_state = ST_IDLE;
-        endcase
-    end
-    
-    //--------------------------------------------------------------------------
-    // Camera Selection and Data Path
-    //--------------------------------------------------------------------------
-    
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            current_cam <= 2'b00;
-        end else if (state == ST_SELECT) begin
-            current_cam <= next_cam;
-        end
-    end
-    
-    // Buffer read enable generation
+
+    wire any_ready = |(buf_pkt_avail & buf_rd_valid & buf_rd_is_sop);
+
+    // unpacked head of current camera
+    wire [31:0] head = buf_rd_data[cur];
+
     always_comb begin
         buf_rd_en = '0;
-        if (state == ST_SEND_PAYLOAD && tx_ready && !buf_empty[current_cam])
-            buf_rd_en[current_cam] = 1'b1;
-    end
-    
-    // Capture selected camera metadata
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            sel_data <= '0;
-            sel_dt   <= '0;
-            sel_wc   <= '0;
-            sel_fs   <= 1'b0;
-            sel_fe   <= 1'b0;
-            sel_ls   <= 1'b0;
-            sel_le   <= 1'b0;
-        end else if (state == ST_SELECT) begin
-            sel_dt <= buf_data_type[next_cam];
-            sel_wc <= buf_word_count[next_cam];
-            sel_fs <= buf_frame_start[next_cam];
-            sel_fe <= buf_frame_end[next_cam];
-            sel_ls <= buf_line_start[next_cam];
-            sel_le <= buf_line_end[next_cam];
-        end else if (state == ST_SEND_PAYLOAD && tx_ready) begin
-            sel_data <= buf_data[current_cam];
-        end
-    end
-    
-    // Byte counter for payload
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            remaining_bytes <= 16'h0;
-        end else begin
-            case (state)
-                ST_SELECT: remaining_bytes <= buf_word_count[next_cam];
-                ST_SEND_PAYLOAD: begin
-                    if (tx_ready && remaining_bytes > 4)
-                        remaining_bytes <= remaining_bytes - 4;
-                    else if (tx_ready)
-                        remaining_bytes <= 16'h0;
-                end
-                default: ;
-            endcase
-        end
-    end
-    
-    //--------------------------------------------------------------------------
-    // TX Output Generation
-    //--------------------------------------------------------------------------
-    
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            tx_valid <= 1'b0;
-            tx_data  <= '0;
-            tx_vc    <= 2'b00;
-            tx_dt    <= 6'h00;
-            tx_wc    <= 16'h0;
-            tx_fs    <= 1'b0;
-            tx_fe    <= 1'b0;
-            tx_ls    <= 1'b0;
-            tx_le    <= 1'b0;
-        end else begin
-            // Default: deassert
-            tx_valid <= 1'b0;
-            tx_fs    <= 1'b0;
-            tx_fe    <= 1'b0;
-            tx_ls    <= 1'b0;
-            tx_le    <= 1'b0;
-            
-            case (state)
-                ST_SEND_HEADER: begin
-                    if (tx_ready) begin
-                        tx_valid <= 1'b1;
-                        tx_vc    <= current_cam;  // Camera ID = Virtual Channel
-                        tx_dt    <= sel_dt;
-                        tx_wc    <= sel_wc;
-                        tx_fs    <= sel_fs;
-                        tx_fe    <= sel_fe;
-                        tx_ls    <= sel_ls;
-                        tx_le    <= sel_le;
-                    end
-                end
-                
-                ST_SEND_PAYLOAD: begin
-                    if (tx_ready && buf_valid[current_cam]) begin
-                        tx_valid <= 1'b1;
-                        tx_data  <= buf_data[current_cam];
-                        tx_vc    <= current_cam;
-                    end
-                end
-                
-                default: ;
-            endcase
-        end
-    end
-    
-    //--------------------------------------------------------------------------
-    // Frame Tracking (for debugging/status)
-    //--------------------------------------------------------------------------
-    
-    generate
-        for (genvar i = 0; i < NUM_CAMERAS; i++) begin : gen_frame_track
-            always_ff @(posedge clk or negedge rst_n) begin
-                if (!rst_n)
-                    in_frame[i] <= 1'b0;
-                else begin
-                    if (buf_frame_start[i] && !buf_empty[i])
-                        in_frame[i] <= 1'b1;
-                    else if (buf_frame_end[i] && !buf_empty[i])
-                        in_frame[i] <= 1'b0;
-                end
+        sop_valid = 1'b0;
+        pay_valid = 1'b0;
+        sop_vc    = cur[1:0];
+        sop_dt    = sop_dt_f(head);
+        sop_wc    = sop_wc_f(head);
+        sop_short = sop_short_f(head);
+        pay_data  = head;
+
+        unique case (state)
+            ST_SOP: begin
+                sop_valid = 1'b1;
+                if (sop_ready) buf_rd_en[cur] = 1'b1;   // pop the SOP token
             end
+            ST_PAY: begin
+                pay_valid = buf_rd_valid[cur] && !buf_rd_is_sop[cur];
+                if (pay_valid && pay_ready) buf_rd_en[cur] = 1'b1;
+            end
+            default: ;
+        endcase
+    end
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= ST_SEL;
+            cur   <= '0;
+        end else begin
+            unique case (state)
+                ST_SEL: begin
+                    if (any_ready) begin
+                        cur   <= nxt;
+                        state <= ST_SOP;
+                    end
+                end
+                ST_SOP: begin
+                    if (sop_ready)
+                        state <= sop_short_f(head) ? ST_SEL : ST_PAY;
+                end
+                ST_PAY: begin
+                    if (pay_valid && pay_ready && buf_rd_last[cur])
+                        state <= ST_SEL;
+                end
+                default: state <= ST_SEL;
+            endcase
         end
-    endgenerate
+    end
 
 endmodule
+
+`default_nettype wire
