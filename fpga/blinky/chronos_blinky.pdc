@@ -1,0 +1,38 @@
+# ==============================================================================
+# Chronos blinky pin constraints — minimal bring-up bitstream
+# Target device : Lattice CrossLink-NX  LIFCL-40-9BG400C  (U3, BG400 package)
+# Board         : HW_CHRONOS_R1
+# Reference     : hardware/Chronos.net (Altium netlist), Schematic/HW_CHRONOS_R1.PDF
+# ==============================================================================
+#
+# Only the four green status LEDs and the GSRN reset button are wired here.
+# Everything else is left unconstrained — Radiant will allocate fabric without
+# any I/O placement requirements.
+#
+# ------------------------------------------------------------------------------
+# Global reset (SW4 push-button + R69 4.7k pull-up to 3V3, active-low)
+# ------------------------------------------------------------------------------
+ldc_set_location -site {G19} [get_ports rst_n]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP} [get_ports rst_n]
+
+# ------------------------------------------------------------------------------
+# Status LEDs — active-high through Q1..Q4 NPN drivers (so 1 = LED on).
+#   LED0 -> E17  (D14, leftmost when viewing the silkscreen)
+#   LED1 -> F13  (D15)
+#   LED2 -> G13  (D16)
+#   LED3 -> F14  (D17 — note: shares topology with INITN indicator? Check.)
+# These four nets are in a generic 3.3V bank.
+# ------------------------------------------------------------------------------
+ldc_set_location -site {E17} [get_ports {led_status[0]}]
+ldc_set_location -site {F13} [get_ports {led_status[1]}]
+ldc_set_location -site {G13} [get_ports {led_status[2]}]
+ldc_set_location -site {F14} [get_ports {led_status[3]}]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 DRIVE=4 SLEWRATE=SLOW} [get_ports {led_status[*]}]
+
+# ------------------------------------------------------------------------------
+# Internal clock (HFCLKOUT from OSC_CORE) — declare it for STA.  The
+# OSC_CORE primitive's HFCLKOUT is intrinsically a clock source so Radiant
+# usually picks this up automatically, but being explicit silences the
+# "input port detection" warnings.
+# ------------------------------------------------------------------------------
+create_clock -name clk_int -period 22.2 [get_pins u_osc/HFCLKOUT]

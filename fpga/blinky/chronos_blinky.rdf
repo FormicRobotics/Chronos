@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RadiantProject version="4.2" radiant="2025.2.1.321.0" title="chronos_blinky" device="LIFCL-40-9BG400C" performance_grade="9_High-Performance_1.0V" family_int="je5d00" device_int="je5d30" package_int="CABGA400" operation_int="COM" speed_int="12" default_implementation="impl1">
+    <Options/>
+    <Implementation title="impl1" dir="impl1" description="impl1" synthesis="lse" default_strategy="Strategy1">
+        <Options/>
+        <Source name="chronos_blinky.sv" type="Verilog" type_short="Verilog">
+            <Options VerilogStandard="System Verilog"/>
+        </Source>
+        <Source name="chronos_blinky.pdc" type="Physical Constraints File" type_short="PDC">
+            <Options/>
+        </Source>
+    </Implementation>
+    <Strategy name="Strategy1" file="chronos_blinky1.sty"/>
+</RadiantProject>
