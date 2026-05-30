@@ -1,0 +1,33 @@
+# Lattice node-locked license (machine-bound; never commit)
+license.dat
+
+# Lattice Radiant build outputs (regenerated on every build)
+fpga/blinky/impl1/
+fpga/blinky/es20/
+fpga/blinky/gui/
+fpga/blinky/gui /
+
+# Tool log / help dumps and promotion artifacts
+fpga/blinky/build_log.txt
+fpga/blinky/bitgen_help.txt
+fpga/blinky/sysconfig_help.txt
+fpga/blinky/promote.pfl
+fpga/blinky/promote.xml
+
+# Generic Radiant generated file types
+*.udb
+*.vdb
+*.bit
+*.par
+*.pad
+*.twr
+*.mrp
+*.bgn
+*.drc
+*.fea
+*.pwrprd
+*.srp
+*.psn
+*.synproj
+*.lsedata
+*.hrr
