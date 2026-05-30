@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>
+#include <linux/i2c-dev.h>
 
 #include "chronos_capture.h"
 
@@ -379,51 +380,82 @@ static chronos_error_t init_imu(void)
     return CHRONOS_OK;
 }
 
+/*
+ * Read one accel/gyro sample from the ICM-42688-P IIO interface.
+ *
+ * On the production board the IMU lives at /sys/bus/iio/devices/iio:device0
+ * (driver name "icm42688-chronos").  We pull the raw counts via sysfs and
+ * multiply by the scale that the driver advertises (in_*_scale, expressed
+ * as a fractional number, IIO_VAL_INT_PLUS_NANO).  Falling back to the
+ * 16 g / 2000 dps default scales lets the app boot before the driver has
+ * fully populated its sysfs files.
+ */
+static long read_long_file(const char *path, long fallback)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return fallback;
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return fallback;
+    buf[n] = '\0';
+    /* Use strtol so signed values are parsed correctly (atoi gives 0 on '-'). */
+    return strtol(buf, NULL, 10);
+}
+
+static double read_scale_file(const char *path, double fallback)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return fallback;
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return fallback;
+    buf[n] = '\0';
+    return strtod(buf, NULL);
+}
+
 static void read_imu_data(void)
 {
     imu_context_t *imu = &g_ctx.imu;
-    
     if (!imu->enabled) return;
-    
-    /* Read from IIO sysfs */
+
+    const char *axis_name[3] = { "x", "y", "z" };
     char path[256];
-    char buf[64];
-    int fd;
-    
+
     pthread_mutex_lock(&imu->lock);
-    
-    /* Read accelerometer */
-    for (int i = 0; i < 3; i++) {
-        const char *axis[] = {"x", "y", "z"};
-        snprintf(path, sizeof(path), "%s/in_accel_%s_raw", imu->dev_path, axis[i]);
-        fd = open(path, O_RDONLY);
-        if (fd >= 0) {
-            if (read(fd, buf, sizeof(buf)) > 0) {
-                int raw = atoi(buf);
-                /* Convert to m/s^2 (scale factor depends on range) */
-                imu->latest_data.accel[i] = raw * 0.000598f * 9.80665f;
-            }
-            close(fd);
-        }
+
+    /* Scales (m/s^2 per LSB, rad/s per LSB).  Read once per sample so the
+     * application sees range changes done at runtime via sysfs. */
+    snprintf(path, sizeof(path), "%s/in_accel_scale", imu->dev_path);
+    double acc_scale  = read_scale_file(path, 4.789062e-3); /* 16 g default */
+    snprintf(path, sizeof(path), "%s/in_anglvel_scale", imu->dev_path);
+    double gyro_scale = read_scale_file(path, 1.064724e-3); /* 2000 dps default */
+
+    for (int i = 0; i < 3; ++i) {
+        snprintf(path, sizeof(path),
+                 "%s/in_accel_%s_raw", imu->dev_path, axis_name[i]);
+        long raw = read_long_file(path, 0);
+        imu->latest_data.accel[i] = (float)(raw * acc_scale);
+
+        snprintf(path, sizeof(path),
+                 "%s/in_anglvel_%s_raw", imu->dev_path, axis_name[i]);
+        raw = read_long_file(path, 0);
+        imu->latest_data.gyro[i] = (float)(raw * gyro_scale);
     }
-    
-    /* Read gyroscope */
-    for (int i = 0; i < 3; i++) {
-        const char *axis[] = {"x", "y", "z"};
-        snprintf(path, sizeof(path), "%s/in_anglvel_%s_raw", imu->dev_path, axis[i]);
-        fd = open(path, O_RDONLY);
-        if (fd >= 0) {
-            if (read(fd, buf, sizeof(buf)) > 0) {
-                int raw = atoi(buf);
-                /* Convert to rad/s */
-                imu->latest_data.gyro[i] = raw * 0.001065f;
-            }
-            close(fd);
-        }
-    }
-    
-    imu->latest_data.timestamp_ns = 0;  /* TODO: Read from sync attribute */
-    
+
+    /* Temperature: (raw / 132.48) + 25 deg C  -- raw in milli-degrees C
+     * is exposed by the driver as in_temp_raw with separate scale/offset. */
+    snprintf(path, sizeof(path), "%s/in_temp_raw", imu->dev_path);
+    long traw = read_long_file(path, 0);
+    imu->latest_data.temp = (float)(traw / 132.48 + 25.0);
+
+    /* Sync count / last_sync_time exposed by the driver as device attrs. */
+    snprintf(path, sizeof(path), "%s/sync_count", imu->dev_path);
+    imu->latest_data.sync_count = (uint64_t)read_long_file(path, 0);
+    snprintf(path, sizeof(path), "%s/last_sync_time", imu->dev_path);
+    imu->latest_data.timestamp_ns = (uint64_t)read_long_file(path, 0);
+
     pthread_mutex_unlock(&imu->lock);
 }
 
@@ -434,103 +466,119 @@ static void read_imu_data(void)
 static void *capture_thread_func(void *arg)
 {
     (void)arg;
-    
-    fd_set fds;
-    struct timeval tv;
+
+    /* Build a select() set out of cameras that actually opened cleanly.
+     * Treat fd <= 0 as "not present" — the previous code FD_SET()ed those
+     * which is undefined behaviour. */
     int max_fd = 0;
-    
-    /* Find max fd */
-    for (int i = 0; i < CHRONOS_NUM_CAMERAS; i++) {
-        if (g_ctx.cameras[i].fd > max_fd) {
-            max_fd = g_ctx.cameras[i].fd;
+    int active_count = 0;
+    for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) {
+        int fd = g_ctx.cameras[i].fd;
+        if (fd > 0) {
+            ++active_count;
+            if (fd > max_fd) max_fd = fd;
         }
     }
-    
+    if (active_count == 0) {
+        fprintf(stderr, "No active cameras — capture thread exiting.\n");
+        return NULL;
+    }
+
+    /* Track which buffers we have actually dequeued (and therefore own). */
     while (g_ctx.running) {
+        fd_set fds;
         FD_ZERO(&fds);
-        for (int i = 0; i < CHRONOS_NUM_CAMERAS; i++) {
-            FD_SET(g_ctx.cameras[i].fd, &fds);
+        for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) {
+            if (g_ctx.cameras[i].fd > 0)
+                FD_SET(g_ctx.cameras[i].fd, &fds);
         }
-        
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-        
+
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
         int ret = select(max_fd + 1, &fds, NULL, NULL, &tv);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
         }
-        
-        if (ret == 0) continue;  /* Timeout */
-        
-        /* Dequeue frames from all ready cameras */
-        chronos_sync_frame_set_t frame_set = {0};
+        if (ret == 0) continue;             /* idle tick — keep looping */
+
+        chronos_sync_frame_set_t frame_set;
+        memset(&frame_set, 0, sizeof(frame_set));
         int frames_received = 0;
-        
-        for (int i = 0; i < CHRONOS_NUM_CAMERAS; i++) {
-            if (FD_ISSET(g_ctx.cameras[i].fd, &fds)) {
-                int buf_idx;
-                chronos_frame_meta_t meta;
-                
-                if (dequeue_buffer(&g_ctx.cameras[i], &buf_idx, &meta) == CHRONOS_OK) {
-                    internal_buffer_t *buf = &g_ctx.cameras[i].buffers[buf_idx];
-                    
-                    frame_set.frames[i].dmabuf_fd = buf->dmabuf_fd;
-                    frame_set.frames[i].nvbuf_fd = buf->nvbuf_fd;
-                    frame_set.frames[i].cuda_ptr = buf->cuda_ptr;
-                    frame_set.frames[i].width = CHRONOS_FRAME_WIDTH;
-                    frame_set.frames[i].height = CHRONOS_FRAME_HEIGHT;
-                    frame_set.frames[i].pitch = CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_BPP;
-                    frame_set.frames[i].size = CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT * CHRONOS_FRAME_BPP;
-                    frame_set.frames[i].meta = meta;
-                    frame_set.frames[i].meta.camera_id = i;
-                    frame_set.frames[i].meta.vc_id = i;
-                    
-                    frames_received++;
-                    g_ctx.stats.frames_captured[i]++;
-                }
-            }
+        int dequeued_idx[CHRONOS_NUM_CAMERAS];
+        for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) dequeued_idx[i] = -1;
+
+        /* Drain one frame from every ready camera. */
+        for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) {
+            if (g_ctx.cameras[i].fd <= 0) continue;
+            if (!FD_ISSET(g_ctx.cameras[i].fd, &fds)) continue;
+
+            int buf_idx;
+            chronos_frame_meta_t meta;
+            if (dequeue_buffer(&g_ctx.cameras[i], &buf_idx, &meta) != CHRONOS_OK)
+                continue;
+
+            dequeued_idx[i] = buf_idx;
+            internal_buffer_t *buf = &g_ctx.cameras[i].buffers[buf_idx];
+
+            chronos_frame_t *f = &frame_set.frames[i];
+            f->dmabuf_fd = buf->dmabuf_fd;
+            f->nvbuf_fd  = buf->nvbuf_fd;
+            f->cuda_ptr  = buf->cuda_ptr;
+            f->width     = CHRONOS_FRAME_WIDTH;
+            f->height    = CHRONOS_FRAME_HEIGHT;
+            f->pitch     = CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_BPP;
+            f->size      = CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT * CHRONOS_FRAME_BPP;
+            f->meta            = meta;
+            f->meta.camera_id  = (uint32_t)i;
+            f->meta.vc_id      = (uint32_t)i;
+
+            ++frames_received;
+            ++g_ctx.stats.frames_captured[i];
         }
-        
-        /* Read IMU data */
+
+        /* IMU sample (best-effort). */
         read_imu_data();
         pthread_mutex_lock(&g_ctx.imu.lock);
         frame_set.imu = g_ctx.imu.latest_data;
         pthread_mutex_unlock(&g_ctx.imu.lock);
-        
-        frame_set.complete = (frames_received == CHRONOS_NUM_CAMERAS);
-        frame_set.sync_sequence = g_ctx.cameras[0].sequence++;
-        
-        /* Deliver frame set */
+
+        frame_set.complete       = (frames_received == active_count);
+        frame_set.sync_sequence  = g_ctx.cameras[0].sequence++;
+        frame_set.sync_timestamp_ns = frame_set.frames[0].meta.timestamp_ns;
+
+        if (!frame_set.complete)
+            ++g_ctx.stats.sync_errors;
+
+        /* Deliver. */
         if (g_ctx.callback) {
             g_ctx.callback(&frame_set, g_ctx.callback_user_data);
+            /* Caller is expected to call chronos_release_frame_set(). */
         } else {
             pthread_mutex_lock(&g_ctx.mutex);
             if (g_ctx.pending_frame_set) {
-                /* Overwrite old frame set */
-                g_ctx.stats.buffer_overruns++;
+                ++g_ctx.stats.buffer_overruns;
+                free(g_ctx.pending_frame_set);
             }
             g_ctx.pending_frame_set = malloc(sizeof(frame_set));
             if (g_ctx.pending_frame_set) {
                 *g_ctx.pending_frame_set = frame_set;
-                g_ctx.frame_available = true;
+                g_ctx.frame_available    = true;
                 pthread_cond_signal(&g_ctx.frame_ready_cond);
             }
             pthread_mutex_unlock(&g_ctx.mutex);
         }
-        
-        /* Re-queue buffers */
-        for (int i = 0; i < CHRONOS_NUM_CAMERAS; i++) {
-            /* Queue next available buffer */
-            for (uint32_t j = 0; j < g_ctx.cameras[i].buf_count; j++) {
-                if (g_ctx.cameras[i].buffers[j].state == BUF_STATE_FREE) {
-                    queue_buffer(&g_ctx.cameras[i], j);
-                    break;
-                }
-            }
+
+        /* Re-queue every buffer we just dequeued.  Previous version walked
+         * every camera's buffer list looking for BUF_STATE_FREE, which
+         * left dequeued buffers stuck in DEQUEUED forever after the first
+         * non-callback consumer. */
+        for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) {
+            if (dequeued_idx[i] < 0) continue;
+            if (g_ctx.cameras[i].buffers[dequeued_idx[i]].state == BUF_STATE_DEQUEUED)
+                queue_buffer(&g_ctx.cameras[i], dequeued_idx[i]);
         }
     }
-    
+
     return NULL;
 }
 
@@ -632,16 +680,127 @@ void chronos_shutdown(void)
     printf("Chronos capture system shutdown\n");
 }
 
+/*
+ * Apply the cached configuration to the FPGA register bank over I2C.
+ *
+ * The kernel-side chronos_csi driver also writes the same registers via the
+ * I2C client it owns, but the user-space library needs to be able to push a
+ * config update before streaming starts (e.g. set the frame rate before
+ * VIDIOC_STREAMON) without round-tripping through a custom ioctl.  We open
+ * /dev/i2c-<bus> directly and talk to the FPGA at 7-bit address 0x3C.
+ *
+ * The bus number is taken from CHRONOS_FPGA_I2C_BUS (default 1, matching the
+ * Jetson Orin NX I2C2 instance that the device-tree overlay activates).
+ */
+#define CHRONOS_FPGA_I2C_ADDR  0x3C
+#ifndef CHRONOS_FPGA_I2C_BUS
+#define CHRONOS_FPGA_I2C_BUS   1
+#endif
+
+/* Register map – must stay in lock-step with config_regs.sv */
+enum {
+    FPGA_REG_CTRL          = 0x00,
+    FPGA_REG_FRAME_RATE    = 0x01,
+    FPGA_REG_PULSE_WIDTH_L = 0x02,
+    FPGA_REG_PULSE_WIDTH_H = 0x03,
+    FPGA_REG_CAM_ENABLE    = 0x04,
+    FPGA_REG_DATA_TYPE     = 0x05,
+    FPGA_REG_TRIG_DELAY_0  = 0x10,
+};
+
+static int fpga_i2c_write(uint8_t reg, uint8_t val)
+{
+    char dev_path[32];
+    snprintf(dev_path, sizeof(dev_path), "/dev/i2c-%d", CHRONOS_FPGA_I2C_BUS);
+    int fd = open(dev_path, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "FPGA I2C open %s failed: %s\n", dev_path, strerror(errno));
+        return -1;
+    }
+    if (ioctl(fd, I2C_SLAVE, CHRONOS_FPGA_I2C_ADDR) < 0) {
+        close(fd);
+        return -1;
+    }
+    uint8_t buf[2] = { reg, val };
+    int ret = write(fd, buf, sizeof(buf)) == sizeof(buf) ? 0 : -1;
+    close(fd);
+    return ret;
+}
+
+static chronos_error_t push_config_to_fpga(const chronos_config_t *cfg)
+{
+    uint32_t fps = cfg->frame_rate ? cfg->frame_rate : 30;
+    if (fps > 120) fps = 120;
+
+    /*
+     * Pulse width is in fabric (clk_sys = 200 MHz) cycles inside the FPGA.
+     * Take half the requested exposure as a generous default — the
+     * sensor's own exposure register controls integration time, FSIN
+     * width only needs to satisfy OV9281's minimum pulse spec (~1 us).
+     */
+    uint32_t pulse_us = cfg->exposure_us ? (cfg->exposure_us / 2) : 10;
+    if (pulse_us < 2)    pulse_us = 2;
+    if (pulse_us > 1000) pulse_us = 1000;
+    uint32_t pulse_cycles = pulse_us * 200;     /* 200 cycles == 1 us @ 200 MHz */
+    if (pulse_cycles > 0xFFFF) pulse_cycles = 0xFFFF;
+
+    if (fpga_i2c_write(FPGA_REG_FRAME_RATE,    (uint8_t)fps) < 0)
+        return CHRONOS_ERROR_INIT;
+    if (fpga_i2c_write(FPGA_REG_PULSE_WIDTH_L, (uint8_t)(pulse_cycles & 0xFF)) < 0)
+        return CHRONOS_ERROR_INIT;
+    if (fpga_i2c_write(FPGA_REG_PULSE_WIDTH_H, (uint8_t)((pulse_cycles >> 8) & 0xFF)) < 0)
+        return CHRONOS_ERROR_INIT;
+    if (fpga_i2c_write(FPGA_REG_CAM_ENABLE,    0x0F) < 0)
+        return CHRONOS_ERROR_INIT;
+    if (fpga_i2c_write(FPGA_REG_DATA_TYPE,     0x2B /* RAW10 */) < 0)
+        return CHRONOS_ERROR_INIT;
+
+    /* Per-camera trigger delay calibration (defaults to 0). */
+    for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) {
+        if (fpga_i2c_write((uint8_t)(FPGA_REG_TRIG_DELAY_0 + i), 0) < 0)
+            return CHRONOS_ERROR_INIT;
+    }
+    return CHRONOS_OK;
+}
+
 chronos_error_t chronos_configure(const chronos_config_t *config)
 {
     if (!config) return CHRONOS_ERROR_PARAM;
     if (!g_ctx.initialized) return CHRONOS_ERROR_INIT;
     if (g_ctx.running) return CHRONOS_ERROR_CAPTURE;
-    
+
+    /* Validate up front to avoid pushing nonsense to the hardware. */
+    if (config->frame_rate > 120) return CHRONOS_ERROR_PARAM;
+    if (config->exposure_us > 100000) return CHRONOS_ERROR_PARAM;
+    if (config->buffer_count > CHRONOS_BUFFER_COUNT) return CHRONOS_ERROR_PARAM;
+
     g_ctx.config = *config;
-    
-    /* TODO: Apply configuration to FPGA and sensors */
-    
+    if (g_ctx.config.buffer_count == 0)
+        g_ctx.config.buffer_count = CHRONOS_BUFFER_COUNT;
+
+    /* Apply to the FPGA register bank and the per-sensor V4L2 controls.
+     * If the FPGA is reachable we expect success; otherwise we still keep
+     * the cached config so demo apps that run without an attached board
+     * (eg. CI smoke tests on a Jetson without the daughter card) don't
+     * fail outright. */
+    chronos_error_t fr = push_config_to_fpga(&g_ctx.config);
+    if (fr != CHRONOS_OK) {
+        fprintf(stderr,
+                "Warning: could not push configuration to FPGA (continuing).\n");
+    }
+
+    /* Per-camera exposure / gain via VIDIOC_S_CTRL.  Best-effort. */
+    for (int i = 0; i < CHRONOS_NUM_CAMERAS; ++i) {
+        if (g_ctx.cameras[i].fd < 0)
+            continue;
+        struct v4l2_control ctrl;
+        ctrl.id = V4L2_CID_EXPOSURE;
+        /* OV9281 exposure unit ≈ line time ~= 13.7 us @ 120 fps.
+         * exposure_us / line_us → integer line count. */
+        ctrl.value = (int32_t)(g_ctx.config.exposure_us / 14);
+        (void)ioctl(g_ctx.cameras[i].fd, VIDIOC_S_CTRL, &ctrl);
+    }
+
     return CHRONOS_OK;
 }
 
