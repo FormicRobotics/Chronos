@@ -1,322 +1,427 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Chronos Multi-Camera System Device Tree Overlay
- * Target: NVIDIA Jetson Orin NX
+ * Chronos multi-camera board — device tree overlay for NVIDIA Jetson Orin NX.
  *
- * This overlay configures:
- * - CSI port for 2-lane MIPI input from Chronos FPGA
- * - Virtual channel demultiplexing for 4 cameras
- * - I2C bus for FPGA and camera control
- * - SPI bus for IMU
- * - GPIO for trigger signals
+ * Board reference : HW_CHRONOS_R1
+ * Cameras         : 4 × OV9281 (1280 × 800, RAW10, global shutter)
+ * Aggregator      : Lattice CrossLink-NX LIFCL-40 (single CSI-2 TX, VC0..VC3)
+ * IMU             : TDK InvenSense ICM-42688-P (SPI, FSYNC-tagged)
+ *
+ * Hardware notes (from Chronos.net):
+ *   - Each camera has a dedicated 27 MHz crystal on the daughter-board, so
+ *     XVCLK / MCLK is NOT driven from the Jetson or the FPGA.  We model this
+ *     as a fixed-clock provider for the V4L2 driver only — it does not
+ *     toggle a real signal.
+ *   - The four cameras share ONE CAM_RESET line going into the FPGA pin W18.
+ *     That means we cannot reset cameras independently; the FPGA exposes a
+ *     control bit and we drive it via the host-I2C path, not via a Jetson
+ *     GPIO.  This overlay therefore does not declare reset-gpios for the
+ *     OV9281 nodes.
+ *   - Per-camera I2C buses run on the FPGA side.  The Jetson talks to the
+ *     FPGA over I2C2 (slave addr 0x3C) and the FPGA forwards reads/writes
+ *     to whichever camera I2C master is addressed.  Each sensor node
+ *     therefore lives under a virtual i2c-mux child of the FPGA node.
  */
 
 /dts-v1/;
 /plugin/;
 
 #include <dt-bindings/gpio/tegra234-gpio.h>
-#include <dt-bindings/clock/tegra234-clock.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 
 / {
-    compatible = "nvidia,p3768-0000+p3767-0000";  /* Orin NX */
-    
-    fragment@0 {
-        target-path = "/";
-        __overlay__ {
-            chronos_clk: chronos-clock {
-                compatible = "fixed-clock";
-                #clock-cells = <0>;
-                clock-frequency = <24000000>;
-                clock-output-names = "chronos_mclk";
-            };
-        };
-    };
-    
-    /* I2C bus for camera and FPGA control */
-    fragment@1 {
-        target = <&i2c2>;
-        __overlay__ {
-            #address-cells = <1>;
-            #size-cells = <0>;
-            status = "okay";
-            clock-frequency = <400000>;
-            
-            /* Chronos FPGA configuration interface */
-            chronos_fpga: chronos-fpga@3c {
-                compatible = "chronos,fpga-ctrl";
-                reg = <0x3c>;
-                status = "okay";
-            };
-            
-            /* OV9281 Camera 0 */
-            ov9281_a: ov9281@60 {
-                compatible = "ovti,ov9281";
-                reg = <0x60>;
-                
-                clocks = <&chronos_clk>;
-                clock-names = "xvclk";
-                clock-frequency = <24000000>;
-                
-                avdd-supply = <&vdd_cam_2v8>;
-                dovdd-supply = <&vdd_cam_1v8>;
-                dvdd-supply = <&vdd_cam_1v2>;
-                
-                reset-gpios = <&gpio TEGRA234_MAIN_GPIO(H, 3) GPIO_ACTIVE_LOW>;
-                
-                status = "okay";
-                
-                port {
-                    ov9281_a_out: endpoint {
-                        remote-endpoint = <&chronos_csi_in>;
-                        clock-lanes = <0>;
-                        data-lanes = <1 2>;
-                        link-frequencies = /bits/ 64 <400000000>;
-                    };
-                };
-            };
-            
-            /* Additional OV9281 cameras share same I2C bus but different addresses */
-            /* In practice, all sensors are configured through the FPGA */
-        };
-    };
-    
-    /* SPI bus for IMU */
-    fragment@2 {
-        target = <&spi0>;
-        __overlay__ {
-            #address-cells = <1>;
-            #size-cells = <0>;
-            status = "okay";
-            
-            /* BMI088 IMU */
-            bmi088@0 {
-                compatible = "bosch,bmi088";
-                reg = <0>;
-                spi-max-frequency = <10000000>;
-                
-                /* Interrupt for sync trigger */
-                interrupt-parent = <&gpio>;
-                interrupts = <TEGRA234_MAIN_GPIO(H, 6) IRQ_TYPE_EDGE_RISING>;
-                
-                /* Accelerometer and gyroscope settings */
-                mount-matrix = "1", "0", "0",
-                               "0", "1", "0",
-                               "0", "0", "1";
-                
-                status = "okay";
-            };
-        };
-    };
-    
-    /* CSI port configuration */
-    fragment@3 {
-        target = <&csi>;
-        __overlay__ {
-            status = "okay";
-            
-            channel@0 {
-                reg = <0>;
-                status = "okay";
-                
-                ports {
-                    #address-cells = <1>;
-                    #size-cells = <0>;
-                    
-                    port@0 {
-                        reg = <0>;
-                        chronos_csi_in: endpoint {
-                            status = "okay";
-                            port-index = <0>;
-                            bus-width = <2>;
-                            remote-endpoint = <&chronos_fpga_out>;
-                        };
-                    };
-                    
-                    port@1 {
-                        reg = <1>;
-                        chronos_csi_out: endpoint {
-                            status = "okay";
-                            remote-endpoint = <&chronos_vi_in>;
-                        };
-                    };
-                };
-            };
-        };
-    };
-    
-    /* NVCSI configuration */
-    fragment@4 {
-        target = <&nvcsi>;
-        __overlay__ {
-            status = "okay";
-            
-            channel@0 {
-                reg = <0>;
-                status = "okay";
-                
-                ports {
-                    #address-cells = <1>;
-                    #size-cells = <0>;
-                    
-                    port@0 {
-                        reg = <0>;
-                        chronos_nvcsi_in: endpoint {
-                            status = "okay";
-                            port-index = <0>;
-                            bus-width = <2>;
-                            remote-endpoint = <&chronos_csi_out>;
-                            csi-port = <0>;
-                            num-lanes = <2>;
-                        };
-                    };
-                    
-                    port@1 {
-                        reg = <1>;
-                        chronos_nvcsi_out: endpoint {
-                            status = "okay";
-                        };
-                    };
-                };
-            };
-        };
-    };
-    
-    /* VI (Video Input) configuration */
-    fragment@5 {
-        target = <&vi>;
-        __overlay__ {
-            status = "okay";
-            
-            ports {
-                #address-cells = <1>;
-                #size-cells = <0>;
-                
-                port@0 {
-                    reg = <0>;
-                    chronos_vi_in: endpoint {
-                        status = "okay";
-                        port-index = <0>;
-                        bus-width = <2>;
-                        remote-endpoint = <&chronos_nvcsi_out>;
-                    };
-                };
-            };
-        };
-    };
-    
-    /* Chronos platform device */
-    fragment@6 {
-        target-path = "/";
-        __overlay__ {
-            chronos_csi: chronos-multi-camera {
-                compatible = "chronos,multi-camera-csi";
-                status = "okay";
-                
-                clocks = <&bpmp TEGRA234_CLK_CSI>;
-                clock-names = "csi";
-                
-                /* FPGA configuration I2C */
-                fpga = <&chronos_fpga>;
-                
-                /* Number of virtual channels */
-                num-cameras = <4>;
-                
-                /* Virtual channel mapping */
-                vc-map = <0 1 2 3>;
-                
-                /* Frame format */
-                width = <1280>;
-                height = <800>;
-                format = "Y10";
-                
-                /* DMA memory region */
-                memory-region = <&chronos_reserved>;
-            };
-        };
-    };
-    
-    /* Reserved memory for zero-copy DMA */
-    fragment@7 {
-        target-path = "/reserved-memory";
-        __overlay__ {
-            #address-cells = <2>;
-            #size-cells = <2>;
-            
-            chronos_reserved: chronos-buffer@90000000 {
-                compatible = "shared-dma-pool";
-                reg = <0x0 0x90000000 0x0 0x10000000>;  /* 256MB */
-                no-map;
-                status = "okay";
-            };
-        };
-    };
-    
-    /* Power supplies (adjust to match actual board design) */
-    fragment@8 {
-        target-path = "/";
-        __overlay__ {
-            vdd_cam_2v8: regulator-cam-2v8 {
-                compatible = "regulator-fixed";
-                regulator-name = "vdd_cam_2v8";
-                regulator-min-microvolt = <2800000>;
-                regulator-max-microvolt = <2800000>;
-                regulator-always-on;
-            };
-            
-            vdd_cam_1v8: regulator-cam-1v8 {
-                compatible = "regulator-fixed";
-                regulator-name = "vdd_cam_1v8";
-                regulator-min-microvolt = <1800000>;
-                regulator-max-microvolt = <1800000>;
-                regulator-always-on;
-            };
-            
-            vdd_cam_1v2: regulator-cam-1v2 {
-                compatible = "regulator-fixed";
-                regulator-name = "vdd_cam_1v2";
-                regulator-min-microvolt = <1200000>;
-                regulator-max-microvolt = <1200000>;
-                regulator-always-on;
-            };
-        };
-    };
-    
-    /* GPIO configuration for trigger signals */
-    fragment@9 {
-        target = <&gpio>;
-        __overlay__ {
-            chronos_pins: chronos-pins {
-                gpio-hog;
-                gpios = <TEGRA234_MAIN_GPIO(H, 3) GPIO_ACTIVE_LOW   /* CAM_RST */
-                         TEGRA234_MAIN_GPIO(H, 6) GPIO_ACTIVE_HIGH>; /* IMU_INT */
-                output-low;
-                line-name = "chronos-gpio";
-            };
-        };
-    };
-};
+	compatible = "nvidia,p3768-0000+p3767-0000";  /* Orin NX dev kit */
 
-/* Sensor mode table for tegra-camera-platform */
-/ {
-    fragment@10 {
-        target-path = "/";
-        __overlay__ {
-            tegra-camera-platform {
-                compatible = "nvidia,tegra-camera-platform";
-                
-                modules {
-                    module0 {
-                        badge = "chronos_ov9281_a";
-                        position = "front";
-                        orientation = "0";
-                        
-                        drivernode0 {
-                            pcl_id = "v4l2_sensor";
-                            sysfs-device-tree = "/sys/firmware/devicetree/base/i2c@31e0000/ov9281@60";
-                        };
-                    };
-                };
-            };
-        };
-    };
+	/* Fake xvclk – there is no real Jetson MCLK pin used by this board.
+	 * The sensor driver only uses this as a presence/parent reference. */
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			chronos_xvclk: chronos-xvclk {
+				compatible = "fixed-clock";
+				#clock-cells = <0>;
+				clock-frequency = <27000000>;   /* matches on-board crystal */
+				clock-output-names = "chronos_xvclk";
+			};
+
+			/* Power rails are physically generated on the board; Linux only
+			 * sees them as always-on regulators so that consumer probing
+			 * succeeds. */
+			vdd_cam_2v8: regulator-cam-2v8 {
+				compatible = "regulator-fixed";
+				regulator-name = "vdd_cam_2v8";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-always-on;
+			};
+			vdd_cam_1v8: regulator-cam-1v8 {
+				compatible = "regulator-fixed";
+				regulator-name = "vdd_cam_1v8";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+			};
+			vdd_cam_1v2: regulator-cam-1v2 {
+				compatible = "regulator-fixed";
+				regulator-name = "vdd_cam_1v2";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	/* Host I2C2 -> FPGA configuration bus.  The FPGA exposes the four
+	 * camera I2C masters as an i2c-mux child, so sensors look like normal
+	 * V4L2 subdevs to the rest of the kernel. */
+	fragment@1 {
+		target = <&i2c2>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+			clock-frequency = <400000>;
+
+			chronos_fpga: chronos-fpga@3c {
+				compatible = "chronos,fpga-ctrl";
+				reg = <0x3c>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "okay";
+
+				/*
+				 * Virtual i2c-mux: each child bus maps to one of the
+				 * FPGA's per-camera I2C masters (CAM0..CAM3).  All four
+				 * sensors share the same 0x60 address but live on
+				 * distinct downstream buses.
+				 */
+				chronos_cam_mux: i2c-mux {
+					compatible = "chronos,fpga-i2c-mux";
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					i2c@0 {
+						reg = <0>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+
+						ov9281_0: ov9281@60 {
+							compatible  = "ovti,ov9281";
+							reg         = <0x60>;
+							clocks      = <&chronos_xvclk>;
+							clock-names = "xvclk";
+							clock-frequency = <27000000>;
+							avdd-supply  = <&vdd_cam_2v8>;
+							dovdd-supply = <&vdd_cam_1v8>;
+							dvdd-supply  = <&vdd_cam_1v2>;
+							status = "okay";
+
+							port {
+								ov9281_0_out: endpoint {
+									remote-endpoint = <&chronos_fpga_in0>;
+									clock-lanes = <0>;
+									data-lanes  = <1 2>;
+									link-frequencies = /bits/ 64 <400000000>;
+								};
+							};
+						};
+					};
+
+					i2c@1 {
+						reg = <1>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+
+						ov9281_1: ov9281@60 {
+							compatible  = "ovti,ov9281";
+							reg         = <0x60>;
+							clocks      = <&chronos_xvclk>;
+							clock-names = "xvclk";
+							clock-frequency = <27000000>;
+							avdd-supply  = <&vdd_cam_2v8>;
+							dovdd-supply = <&vdd_cam_1v8>;
+							dvdd-supply  = <&vdd_cam_1v2>;
+							status = "okay";
+
+							port {
+								ov9281_1_out: endpoint {
+									remote-endpoint = <&chronos_fpga_in1>;
+									clock-lanes = <0>;
+									data-lanes  = <1 2>;
+									link-frequencies = /bits/ 64 <400000000>;
+								};
+							};
+						};
+					};
+
+					i2c@2 {
+						reg = <2>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+
+						ov9281_2: ov9281@60 {
+							compatible  = "ovti,ov9281";
+							reg         = <0x60>;
+							clocks      = <&chronos_xvclk>;
+							clock-names = "xvclk";
+							clock-frequency = <27000000>;
+							avdd-supply  = <&vdd_cam_2v8>;
+							dovdd-supply = <&vdd_cam_1v8>;
+							dvdd-supply  = <&vdd_cam_1v2>;
+							status = "okay";
+
+							port {
+								ov9281_2_out: endpoint {
+									remote-endpoint = <&chronos_fpga_in2>;
+									clock-lanes = <0>;
+									data-lanes  = <1 2>;
+									link-frequencies = /bits/ 64 <400000000>;
+								};
+							};
+						};
+					};
+
+					i2c@3 {
+						reg = <3>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+
+						ov9281_3: ov9281@60 {
+							compatible  = "ovti,ov9281";
+							reg         = <0x60>;
+							clocks      = <&chronos_xvclk>;
+							clock-names = "xvclk";
+							clock-frequency = <27000000>;
+							avdd-supply  = <&vdd_cam_2v8>;
+							dovdd-supply = <&vdd_cam_1v8>;
+							dvdd-supply  = <&vdd_cam_1v2>;
+							status = "okay";
+
+							port {
+								ov9281_3_out: endpoint {
+									remote-endpoint = <&chronos_fpga_in3>;
+									clock-lanes = <0>;
+									data-lanes  = <1 2>;
+									link-frequencies = /bits/ 64 <400000000>;
+								};
+							};
+						};
+					};
+				};
+			};
+		};
+	};
+
+	/* SPI to the ICM-42688-P IMU (the netlist confirms this is the part
+	 * fitted in IC1, NOT a BMI088).  INT1 is wired back to the FPGA, then
+	 * exported to the Jetson on GPIO_H_6. */
+	fragment@2 {
+		target = <&spi0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			icm42688@0 {
+				compatible = "invensense,icm42688p";
+				reg = <0>;
+				spi-max-frequency = <10000000>;
+				spi-cpha;     /* Mode 0 also legal; pick 3 if board prefers */
+
+				interrupt-parent = <&gpio>;
+				interrupts = <TEGRA234_MAIN_GPIO(H, 6) IRQ_TYPE_LEVEL_HIGH>;
+
+				/* Mount matrix from the IMU package to the board frame.
+				 * The ICM-42688 footprint on HW_CHRONOS_R1 puts +X along
+				 * the camera baseline; if your enclosure rotates the board
+				 * adjust this matrix accordingly. */
+				mount-matrix = "1", "0", "0",
+				               "0", "1", "0",
+				               "0", "0", "1";
+				status = "okay";
+			};
+		};
+	};
+
+	/* CSI port that the FPGA's CSI-2 TX is wired to.  Four input ports —
+	 * one per virtual channel — fan out from the FPGA node into the same
+	 * NVCSI channel.  This lets the chronos_csi driver demux VC0..VC3
+	 * into /dev/video0..3 while everything stays on a single 2-lane PHY. */
+	fragment@3 {
+		target-path = "/";
+		__overlay__ {
+			chronos_csi: chronos-multi-camera {
+				compatible = "chronos,multi-camera-csi";
+				status = "okay";
+
+				num-cameras = <4>;
+				vc-map      = <0 1 2 3>;
+				width       = <1280>;
+				height      = <800>;
+				format      = "Y10";
+
+				fpga = <&chronos_fpga>;
+				memory-region = <&chronos_reserved>;
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 { reg = <0>; chronos_fpga_in0: endpoint {
+						remote-endpoint = <&ov9281_0_out>;
+						data-lanes = <1 2>;
+					}; };
+					port@1 { reg = <1>; chronos_fpga_in1: endpoint {
+						remote-endpoint = <&ov9281_1_out>;
+						data-lanes = <1 2>;
+					}; };
+					port@2 { reg = <2>; chronos_fpga_in2: endpoint {
+						remote-endpoint = <&ov9281_2_out>;
+						data-lanes = <1 2>;
+					}; };
+					port@3 { reg = <3>; chronos_fpga_in3: endpoint {
+						remote-endpoint = <&ov9281_3_out>;
+						data-lanes = <1 2>;
+					}; };
+					port@4 { reg = <4>; chronos_csi_out: endpoint {
+						remote-endpoint = <&chronos_nvcsi_in>;
+						data-lanes = <1 2>;
+					}; };
+				};
+			};
+		};
+	};
+
+	/* NVCSI / VI plumbing.  Bus-width = 2, virtual-channels = 4. */
+	fragment@4 {
+		target = <&nvcsi>;
+		__overlay__ {
+			status = "okay";
+			num-channels = <1>;
+
+			channel@0 {
+				reg = <0>;
+				status = "okay";
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+						chronos_nvcsi_in: endpoint {
+							port-index   = <0>;
+							bus-width    = <2>;
+							num-lanes    = <2>;
+							remote-endpoint = <&chronos_csi_out>;
+						};
+					};
+					port@1 {
+						reg = <1>;
+						chronos_nvcsi_out: endpoint {
+							remote-endpoint = <&chronos_vi_in>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+	fragment@5 {
+		target = <&vi>;
+		__overlay__ {
+			status = "okay";
+			num-channels = <4>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					chronos_vi_in: endpoint {
+						port-index = <0>;
+						bus-width  = <2>;
+						remote-endpoint = <&chronos_nvcsi_out>;
+					};
+				};
+			};
+		};
+	};
+
+	/* 256 MiB reserved for zero-copy DMA.  Adjust offset for your kernel
+	 * layout if needed. */
+	fragment@6 {
+		target-path = "/reserved-memory";
+		__overlay__ {
+			#address-cells = <2>;
+			#size-cells = <2>;
+
+			chronos_reserved: chronos-buffer@90000000 {
+				compatible = "shared-dma-pool";
+				reg = <0x0 0x90000000 0x0 0x10000000>;
+				no-map;
+				status = "okay";
+			};
+		};
+	};
+
+	/* tegra-camera-platform module list — one badge per virtual channel.
+	 * sysfs paths point through the FPGA i2c-mux so udev rules can attach
+	 * per-camera. */
+	fragment@7 {
+		target-path = "/";
+		__overlay__ {
+			tegra-camera-platform {
+				compatible = "nvidia,tegra-camera-platform";
+				num_csi_lanes  = <2>;
+				max_lane_speed = <800000>;        /* kbps per lane */
+				min_bits_per_pixel = <10>;
+				vi_peak_byte_per_pixel = <2>;
+				vi_bw_margin_pct = <25>;
+				max_pixel_rate = <500000>;
+				isp_peak_byte_per_pixel = <2>;
+				isp_bw_margin_pct = <25>;
+
+				modules {
+					module0 {
+						badge = "chronos_ov9281_0";
+						position = "front";
+						orientation = "0";
+						drivernode0 {
+							pcl_id = "v4l2_sensor";
+							devname = "ov9281 30-0060";
+						};
+					};
+					module1 {
+						badge = "chronos_ov9281_1";
+						position = "front";
+						orientation = "0";
+						drivernode0 {
+							pcl_id = "v4l2_sensor";
+							devname = "ov9281 31-0060";
+						};
+					};
+					module2 {
+						badge = "chronos_ov9281_2";
+						position = "front";
+						orientation = "0";
+						drivernode0 {
+							pcl_id = "v4l2_sensor";
+							devname = "ov9281 32-0060";
+						};
+					};
+					module3 {
+						badge = "chronos_ov9281_3";
+						position = "front";
+						orientation = "0";
+						drivernode0 {
+							pcl_id = "v4l2_sensor";
+							devname = "ov9281 33-0060";
+						};
+					};
+				};
+			};
+		};
+	};
 };

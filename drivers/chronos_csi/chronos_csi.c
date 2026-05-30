@@ -219,28 +219,51 @@ static void chronos_buf_queue(struct vb2_buffer *vb)
     spin_unlock_irqrestore(&ch->qlock, flags);
 }
 
+static int chronos_count_streaming(struct chronos_dev *cdev)
+{
+    int n = 0, i;
+    for (i = 0; i < CHRONOS_MAX_CAMERAS; ++i)
+        if (cdev->channels[i].streaming)
+            ++n;
+    return n;
+}
+
 static int chronos_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
     struct chronos_channel *ch = vb2_get_drv_priv(vq);
     struct chronos_dev *cdev = ch->parent;
     int ret;
-    
+
     dev_info(cdev->dev, "VC%d: Start streaming\n", ch->vc_id);
-    
-    ch->sequence = 0;
+
+    ch->sequence  = 0;
     ch->streaming = true;
-    
-    /* Enable FPGA trigger if this is the first channel to stream */
-    if (ch->vc_id == 0) {
+
+    /*
+     * Enable the FPGA's frame-sync generator the first time *any* channel
+     * is opened.  Applications routinely stream cameras independently, so
+     * the previous "only VC0 controls the trigger" rule prevented other
+     * cameras from ever receiving FSIN.
+     */
+    if (chronos_count_streaming(cdev) == 1) {
+        /*
+         * The platform node does not own the I2C client to the FPGA — the
+         * user-space library and an i2c-attach driver each push register
+         * writes.  If neither is bound yet, silently continue: the trigger
+         * may already be running from a previous attach.
+         */
         ret = chronos_fpga_set_trigger_enable(cdev, true);
-        if (ret) {
-            dev_err(cdev->dev, "Failed to enable trigger\n");
+        if (ret == -ENODEV) {
+            dev_info(cdev->dev,
+                     "FPGA I2C client not bound, skipping trigger enable\n");
+        } else if (ret) {
+            dev_err(cdev->dev, "Failed to enable FPGA trigger (%d)\n", ret);
             ch->streaming = false;
             return ret;
         }
         cdev->sync_active = true;
     }
-    
+
     return 0;
 }
 
@@ -250,30 +273,29 @@ static void chronos_stop_streaming(struct vb2_queue *vq)
     struct chronos_dev *cdev = ch->parent;
     struct chronos_buffer *buf, *tmp;
     unsigned long flags;
-    
+
     dev_info(cdev->dev, "VC%d: Stop streaming\n", ch->vc_id);
-    
+
     ch->streaming = false;
-    
-    /* Disable trigger if last channel */
-    if (ch->vc_id == 0) {
+
+    /* Disable the trigger only when the last consumer goes away. */
+    if (chronos_count_streaming(cdev) == 0) {
         chronos_fpga_set_trigger_enable(cdev, false);
         cdev->sync_active = false;
     }
-    
-    /* Return all buffers */
+
     spin_lock_irqsave(&ch->qlock, flags);
-    
+
     if (ch->active_buf) {
         vb2_buffer_done(&ch->active_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
         ch->active_buf = NULL;
     }
-    
+
     list_for_each_entry_safe(buf, tmp, &ch->buf_list, list) {
         list_del(&buf->list);
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
     }
-    
+
     spin_unlock_irqrestore(&ch->qlock, flags);
 }
 

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Makefile for BMI088 IMU driver
+# Makefile for the ICM-42688-P IMU driver used on the Chronos board.
 
-obj-$(CONFIG_IIO_BMI088_CHRONOS) += bmi088_chronos.o
+obj-$(CONFIG_IIO_ICM42688_CHRONOS) += icm42688_chronos.o
 
-# For out-of-tree build
+# Out-of-tree build for Jetson kernels.
 ifneq ($(KERNELRELEASE),)
-obj-m := bmi088_chronos.o
+obj-m := icm42688_chronos.o
 else
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
