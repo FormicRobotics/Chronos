@@ -1,162 +1,272 @@
 # ==============================================================================
 # Chronos Multi-Camera MIPI Sync System - Pin Constraints
-# Target: Lattice CrossLink-NX (LIFCL-40)
+# Target device : Lattice CrossLink-NX  LIFCL-40-9BG400C  (U3, BG400 package)
+# Board         : HW_CHRONOS_R1
+# Reference     : Chronos.net (Altium netlist), hardware/sch.pdf
 # ==============================================================================
+#
+# All assignments below are derived directly from the production netlist.
+# Do NOT change without verifying against the schematic — wrong sites will
+# either fail D-PHY constraints or short power rails on the BGA.
+#
+# Notes on D-PHY assignments:
+#   * The CrossLink-NX hardened D-PHY only accepts a pre-defined subset of
+#     MIPI_DPHY-capable site pairs.  The pairs used here come from the
+#     reference board routing and are confirmed to be MIPI_DPHY sites for
+#     LIFCL-40-BG400.  The receiver instance # must match the bank that
+#     these pins belong to (see Radiant IP catalog for DPHY_RX site mapping).
+#
+# ==============================================================================
+# Reference clock
+# ------------------------------------------------------------------------------
+# The FPGA does not have its own crystal.  A 12 MHz clock from the FT2232HL
+# (FT_OSCO, net "12MHZ") is routed to FPGA pin L13 through optional jumper
+# JP2.  Make sure JP2 is closed for normal operation.
+# ==============================================================================
+ldc_set_location -site {L13} [get_ports clk_ref_12m]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18} [get_ports clk_ref_12m]
+create_clock -name clk_ref_12m -period 83.333 [get_ports clk_ref_12m]
 
 # ==============================================================================
-# Clock Input
+# Global reset / user button
+# ------------------------------------------------------------------------------
+# GSRN (net) is the global set/reset.  It is driven by user button SW4
+# through 4.7 k pull-up R69.  Active-low.
 # ==============================================================================
-ldc_set_location -site {L5} [get_ports clk_ref]
-ldc_set_port -iobuf {IO_TYPE=LVCMOS33} [get_ports clk_ref]
-create_clock -name clk_ref -period 40.0 [get_ports clk_ref]
-
-# ==============================================================================
-# Reset
-# ==============================================================================
-ldc_set_location -site {M4} [get_ports rst_n]
+ldc_set_location -site {G19} [get_ports rst_n]
 ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP} [get_ports rst_n]
 
 # ==============================================================================
-# CSI-2 Camera 0 Input (2-lane)
+# Camera 0 CSI-2 RX (J3 / VC0)
+# ------------------------------------------------------------------------------
+# Net names (Altium)         Pin
+#   CAM0_CLK_P / CAM0_CLK_N   A2  / B1
+#   CAM0_0_P   / CAM0_0_N     B2  / C1
+#   CAM0_1_P   / CAM0_1_N     A3  / B3
 # ==============================================================================
-# Clock lane
 ldc_set_location -site {A2} [get_ports csi_rx_clk_p[0]]
-ldc_set_location -site {A3} [get_ports csi_rx_clk_n[0]]
+ldc_set_location -site {B1} [get_ports csi_rx_clk_n[0]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[0] csi_rx_clk_n[0]}]
 
-# Data lane 0
 ldc_set_location -site {B2} [get_ports csi_rx_data_p[0][0]]
-ldc_set_location -site {B3} [get_ports csi_rx_data_n[0][0]]
+ldc_set_location -site {C1} [get_ports csi_rx_data_n[0][0]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[0][0] csi_rx_data_n[0][0]}]
 
-# Data lane 1
-ldc_set_location -site {C2} [get_ports csi_rx_data_p[0][1]]
-ldc_set_location -site {C3} [get_ports csi_rx_data_n[0][1]]
+ldc_set_location -site {A3} [get_ports csi_rx_data_p[0][1]]
+ldc_set_location -site {B3} [get_ports csi_rx_data_n[0][1]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[0][1] csi_rx_data_n[0][1]}]
 
 # ==============================================================================
-# CSI-2 Camera 1 Input (2-lane)
+# Camera 1 CSI-2 RX (J4 / VC1)
+# ------------------------------------------------------------------------------
+#   CAM1_CLK_P / CAM1_CLK_N   W11 / Y11
+#   CAM1_0_P   / CAM1_0_N     V11 / U11
+#   CAM1_1_P   / CAM1_1_N     W13 / V12
 # ==============================================================================
-# Clock lane
-ldc_set_location -site {D2} [get_ports csi_rx_clk_p[1]]
-ldc_set_location -site {D3} [get_ports csi_rx_clk_n[1]]
+ldc_set_location -site {W11} [get_ports csi_rx_clk_p[1]]
+ldc_set_location -site {Y11} [get_ports csi_rx_clk_n[1]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[1] csi_rx_clk_n[1]}]
 
-# Data lane 0
-ldc_set_location -site {E2} [get_ports csi_rx_data_p[1][0]]
-ldc_set_location -site {E3} [get_ports csi_rx_data_n[1][0]]
+ldc_set_location -site {V11} [get_ports csi_rx_data_p[1][0]]
+ldc_set_location -site {U11} [get_ports csi_rx_data_n[1][0]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[1][0] csi_rx_data_n[1][0]}]
 
-# Data lane 1
-ldc_set_location -site {F2} [get_ports csi_rx_data_p[1][1]]
-ldc_set_location -site {F3} [get_ports csi_rx_data_n[1][1]]
+ldc_set_location -site {W13} [get_ports csi_rx_data_p[1][1]]
+ldc_set_location -site {V12} [get_ports csi_rx_data_n[1][1]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[1][1] csi_rx_data_n[1][1]}]
 
 # ==============================================================================
-# CSI-2 Camera 2 Input (2-lane)
+# Camera 2 CSI-2 RX (J5 / VC2)
+# ------------------------------------------------------------------------------
+#   CAM2_CLK_P / CAM2_CLK_N   A8  / B8
+#   CAM2_0_P   / CAM2_0_N     A7  / B7
+#   CAM2_1_P   / CAM2_1_N     A9  / B9
 # ==============================================================================
-# Clock lane
-ldc_set_location -site {G2} [get_ports csi_rx_clk_p[2]]
-ldc_set_location -site {G3} [get_ports csi_rx_clk_n[2]]
+ldc_set_location -site {A8} [get_ports csi_rx_clk_p[2]]
+ldc_set_location -site {B8} [get_ports csi_rx_clk_n[2]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[2] csi_rx_clk_n[2]}]
 
-# Data lane 0
-ldc_set_location -site {H2} [get_ports csi_rx_data_p[2][0]]
-ldc_set_location -site {H3} [get_ports csi_rx_data_n[2][0]]
+ldc_set_location -site {A7} [get_ports csi_rx_data_p[2][0]]
+ldc_set_location -site {B7} [get_ports csi_rx_data_n[2][0]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[2][0] csi_rx_data_n[2][0]}]
 
-# Data lane 1
-ldc_set_location -site {J2} [get_ports csi_rx_data_p[2][1]]
-ldc_set_location -site {J3} [get_ports csi_rx_data_n[2][1]]
+ldc_set_location -site {A9} [get_ports csi_rx_data_p[2][1]]
+ldc_set_location -site {B9} [get_ports csi_rx_data_n[2][1]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[2][1] csi_rx_data_n[2][1]}]
 
 # ==============================================================================
-# CSI-2 Camera 3 Input (2-lane)
+# Camera 3 CSI-2 RX (J6 / VC3)
+# ------------------------------------------------------------------------------
+#   CAM3_CLK_P / CAM3_CLK_N   T13 / T14
+#   CAM3_0_P   / CAM3_0_N     Y15 / Y16
+#   CAM3_1_P   / CAM3_1_N     U15 / V16
 # ==============================================================================
-# Clock lane
-ldc_set_location -site {K2} [get_ports csi_rx_clk_p[3]]
-ldc_set_location -site {K3} [get_ports csi_rx_clk_n[3]]
+ldc_set_location -site {T13} [get_ports csi_rx_clk_p[3]]
+ldc_set_location -site {T14} [get_ports csi_rx_clk_n[3]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_clk_p[3] csi_rx_clk_n[3]}]
 
-# Data lane 0
-ldc_set_location -site {L2} [get_ports csi_rx_data_p[3][0]]
-ldc_set_location -site {L3} [get_ports csi_rx_data_n[3][0]]
+ldc_set_location -site {Y15} [get_ports csi_rx_data_p[3][0]]
+ldc_set_location -site {Y16} [get_ports csi_rx_data_n[3][0]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[3][0] csi_rx_data_n[3][0]}]
 
-# Data lane 1
-ldc_set_location -site {M2} [get_ports csi_rx_data_p[3][1]]
-ldc_set_location -site {M3} [get_ports csi_rx_data_n[3][1]]
+ldc_set_location -site {U15} [get_ports csi_rx_data_p[3][1]]
+ldc_set_location -site {V16} [get_ports csi_rx_data_n[3][1]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_rx_data_p[3][1] csi_rx_data_n[3][1]}]
 
 # ==============================================================================
-# CSI-2 Output to Jetson (2-lane)
+# CSI-2 TX to Jetson (J7)
+# ------------------------------------------------------------------------------
+#   CSI_TX_CLK_P / CSI_TX_CLK_N   T6 / U6
+#   CSI_TX_D0_P  / CSI_TX_D0_N    R7 / T7
+#   CSI_TX_D1_P  / CSI_TX_D1_N    V6 / U7
 # ==============================================================================
-# Clock lane
-ldc_set_location -site {N2} [get_ports csi_tx_clk_p]
-ldc_set_location -site {N3} [get_ports csi_tx_clk_n]
+ldc_set_location -site {T6} [get_ports csi_tx_clk_p]
+ldc_set_location -site {U6} [get_ports csi_tx_clk_n]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_tx_clk_p csi_tx_clk_n}]
 
-# Data lane 0
-ldc_set_location -site {P2} [get_ports csi_tx_data_p[0]]
-ldc_set_location -site {P3} [get_ports csi_tx_data_n[0]]
+ldc_set_location -site {R7} [get_ports csi_tx_data_p[0]]
+ldc_set_location -site {T7} [get_ports csi_tx_data_n[0]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_tx_data_p[0] csi_tx_data_n[0]}]
 
-# Data lane 1
-ldc_set_location -site {R2} [get_ports csi_tx_data_p[1]]
-ldc_set_location -site {R3} [get_ports csi_tx_data_n[1]]
+ldc_set_location -site {V6} [get_ports csi_tx_data_p[1]]
+ldc_set_location -site {U7} [get_ports csi_tx_data_n[1]]
 ldc_set_port -iobuf {IO_TYPE=MIPI_DPHY} [get_ports {csi_tx_data_p[1] csi_tx_data_n[1]}]
 
 # ==============================================================================
-# Trigger Outputs
+# Frame-sync output (single signal -> external buffers U5 / U9)
+# ------------------------------------------------------------------------------
+# Only ONE pin leaves the FPGA — net FSIN_FPGA on U3-R9.  Hardware fan-out:
+#   U5 (SN74LVC125APWR, quad 3-state buffer) -> FSIN0..FSIN3 -> J3..J6 pin 16
+#   U9 (SN74LVC2G125)                        -> FSIN_IMU    -> ICM-42688 pin 9
+#                                            -> FSIN_EXT    -> P1 pin 3
 # ==============================================================================
-ldc_set_location -site {A10} [get_ports cam_trigger[0]]
-ldc_set_location -site {B10} [get_ports cam_trigger[1]]
-ldc_set_location -site {C10} [get_ports cam_trigger[2]]
-ldc_set_location -site {D10} [get_ports cam_trigger[3]]
-ldc_set_location -site {E10} [get_ports imu_trigger]
-ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=8} [get_ports {cam_trigger[*] imu_trigger}]
+ldc_set_location -site {R9} [get_ports fsin_fpga]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=8 SLEWRATE=FAST} [get_ports fsin_fpga]
 
 # ==============================================================================
-# I2C Configuration Interface
+# Shared camera reset (CAM_RESET, active-low to all four sensors)
+# ------------------------------------------------------------------------------
+# Net CAM_RESET drives J3-21, J4-21, J5-21, J6-21 — all cameras share one reset.
 # ==============================================================================
-ldc_set_location -site {A12} [get_ports i2c_scl]
-ldc_set_location -site {B12} [get_ports i2c_sda]
-ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP OPENDRAIN=ON} [get_ports {i2c_scl i2c_sda}]
+ldc_set_location -site {W18} [get_ports cam_resetn]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=4 PULLMODE=UP} [get_ports cam_resetn]
 
 # ==============================================================================
-# Status LEDs
+# Per-camera I2C masters (FPGA acts as master toward each sensor)
+# ------------------------------------------------------------------------------
+# Each camera has its own dedicated 2-wire bus to the FPGA.  Pull-ups to
+# VCCIO5 are populated on-board (4.7 k).
+#   CAM0  SDA = N4   SCL = N5
+#   CAM1  SDA = P5   SCL = P6
+#   CAM2  SDA = P1   SCL = P2
+#   CAM3  SDA = N6   SCL = N7
 # ==============================================================================
-ldc_set_location -site {A14} [get_ports led_status[0]]
-ldc_set_location -site {B14} [get_ports led_status[1]]
-ldc_set_location -site {C14} [get_ports led_status[2]]
-ldc_set_location -site {D14} [get_ports led_status[3]]
+ldc_set_location -site {N4} [get_ports cam_sda[0]]
+ldc_set_location -site {N5} [get_ports cam_scl[0]]
+ldc_set_location -site {P5} [get_ports cam_sda[1]]
+ldc_set_location -site {P6} [get_ports cam_scl[1]]
+ldc_set_location -site {P1} [get_ports cam_sda[2]]
+ldc_set_location -site {P2} [get_ports cam_scl[2]]
+ldc_set_location -site {N6} [get_ports cam_sda[3]]
+ldc_set_location -site {N7} [get_ports cam_scl[3]]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=UP OPENDRAIN=ON} \
+    [get_ports {cam_scl[*] cam_sda[*]}]
+
+# ==============================================================================
+# Host configuration I2C (Jetson <-> FPGA over J7 sideband)
+# ------------------------------------------------------------------------------
+# Nets I2C_CON_SCL (G15) and I2C_CON_SDA (G14) come in on the J7 FPC alongside
+# CSI-TX.  Pulled up to VCCIO1 (1.8 V) by R53 / R54.
+# ==============================================================================
+ldc_set_location -site {G15} [get_ports host_i2c_scl]
+ldc_set_location -site {G14} [get_ports host_i2c_sda]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=UP OPENDRAIN=ON} \
+    [get_ports {host_i2c_scl host_i2c_sda}]
+
+# ==============================================================================
+# IMU (ICM-42688-P, IC1) — SPI mode
+# ------------------------------------------------------------------------------
+#   IMU_CS    = R8   (chip select, active-low)
+#   IMU_SCLK  = P8
+#   IMU_MOSI  = P7   (SDI on the IMU)
+#   IMU_MISO  = T8   (SO   on the IMU)
+#   IMU_INT1  = Y7   (interrupt back to FPGA)
+# Note: FSIN_IMU (sensor FSYNC) is driven by U9 from fsin_fpga (R9).
+# ==============================================================================
+ldc_set_location -site {R8} [get_ports imu_csn]
+ldc_set_location -site {P8} [get_ports imu_sclk]
+ldc_set_location -site {P7} [get_ports imu_mosi]
+ldc_set_location -site {T8} [get_ports imu_miso]
+ldc_set_location -site {Y7} [get_ports imu_int1]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=4} \
+    [get_ports {imu_csn imu_sclk imu_mosi}]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18}                  [get_ports imu_miso]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=DOWN}    [get_ports imu_int1]
+
+# ==============================================================================
+# Status LEDs (green, active-high through Q1..Q4 NPN drivers on the rev1 board
+# — net polarity is therefore "1" = LED on)
+# ------------------------------------------------------------------------------
+#   LED0 = E17   LED1 = F13   LED2 = G13   LED3 = F14
+# ==============================================================================
+ldc_set_location -site {E17} [get_ports led_status[0]]
+ldc_set_location -site {F13} [get_ports led_status[1]]
+ldc_set_location -site {G13} [get_ports led_status[2]]
+ldc_set_location -site {F14} [get_ports led_status[3]]
 ldc_set_port -iobuf {IO_TYPE=LVCMOS33 DRIVE=4} [get_ports led_status[*]]
 
 # ==============================================================================
-# Timing Constraints
+# Debug UART (back to FT2232HL channel B)
+# ------------------------------------------------------------------------------
+# Direction is from the FPGA's perspective:
+#   RXD_UART = F18  (FPGA input,  FT2232 -> FPGA)
+#   TXD_UART = F16  (FPGA output, FPGA  -> FT2232)
+# ==============================================================================
+ldc_set_location -site {F18} [get_ports uart_rxd]
+ldc_set_location -site {F16} [get_ports uart_txd]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=UP}  [get_ports uart_rxd]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=4}      [get_ports uart_txd]
+
+# ==============================================================================
+# Timing constraints
 # ==============================================================================
 
-# PLL generated clocks
-create_generated_clock -name clk_200m -source [get_ports clk_ref] -multiply_by 8 [get_pins u_pll/clk_200m]
-create_generated_clock -name clk_byte -source [get_ports clk_ref] -multiply_by 2 [get_pins u_pll/clk_byte]
+# Internal PLL output (chronos_pll.sv). Only clk_sys is used now; the recovered
+# byte clocks come from the D-PHY IP, not from the PLL CLKOS.
+create_generated_clock -name clk_sys  -source [get_ports clk_ref_12m] \
+    -multiply_by 50 -divide_by 3 [get_pins u_pll/u_pll_core/CLKOP]
 
-# MIPI input clocks (worst case 800Mbps = 400MHz DDR)
-create_clock -name csi_rx_clk_0 -period 2.5 [get_ports csi_rx_clk_p[0]]
-create_clock -name csi_rx_clk_1 -period 2.5 [get_ports csi_rx_clk_p[1]]
-create_clock -name csi_rx_clk_2 -period 2.5 [get_ports csi_rx_clk_p[2]]
-create_clock -name csi_rx_clk_3 -period 2.5 [get_ports csi_rx_clk_p[3]]
+# Per-camera recovered RX byte clocks (soft D-PHY: ECLKDIV output, exposed as the
+# wrapper's byte_clk_o). At 800 Mb/s/lane the byte clock is 100 MHz.
+# NOTE: after generating the IP, confirm the exact clock pin; if the recovered
+# clock root is the ECLKDIV DIVOUT, retarget these to that pin.
+create_clock -name csi_rx_byte_0 -period 10.0 [get_pins gen_cam[0].u_csi2_rx/u_dphy_rx/byte_clk_o]
+create_clock -name csi_rx_byte_1 -period 10.0 [get_pins gen_cam[1].u_csi2_rx/u_dphy_rx/byte_clk_o]
+create_clock -name csi_rx_byte_2 -period 10.0 [get_pins gen_cam[2].u_csi2_rx/u_dphy_rx/byte_clk_o]
+create_clock -name csi_rx_byte_3 -period 10.0 [get_pins gen_cam[3].u_csi2_rx/u_dphy_rx/byte_clk_o]
 
-# Clock domain crossings
+# Hard-TX byte clock (drives the arbiter + frame_buffer read side). 100 MHz.
+create_clock -name csi_tx_byte -period 10.0 [get_pins u_csi2_tx/u_dphy_tx/byte_clk_o]
+
+# Cross-domain treatment: clk_sys, the four recovered RX byte clocks and the TX
+# byte clock are mutually asynchronous (bridged by reset/level/pulse syncs and
+# the async frame_buffer FIFOs).
 set_clock_groups -asynchronous \
-    -group [get_clocks clk_ref] \
-    -group [get_clocks clk_200m] \
-    -group [get_clocks clk_byte] \
-    -group [get_clocks csi_rx_clk_*]
+    -group [get_clocks clk_ref_12m] \
+    -group [get_clocks clk_sys] \
+    -group [get_clocks csi_rx_byte_0] \
+    -group [get_clocks csi_rx_byte_1] \
+    -group [get_clocks csi_rx_byte_2] \
+    -group [get_clocks csi_rx_byte_3] \
+    -group [get_clocks csi_tx_byte]
 
-# I2C is slow - false path
-set_false_path -from [get_ports {i2c_scl i2c_sda}]
-set_false_path -to [get_ports i2c_sda]
+# I2C is asynchronous low-speed
+set_false_path -from [get_ports {host_i2c_scl host_i2c_sda cam_scl[*] cam_sda[*]}]
+set_false_path -to   [get_ports {host_i2c_sda cam_sda[*]}]
 
-# Trigger outputs - max skew constraint
-set_max_delay -from [get_pins u_trigger_gen/trigger_pulse] -to [get_ports cam_trigger[*]] 0.5
-set_max_delay -from [get_pins u_trigger_gen/trigger_pulse] -to [get_ports imu_trigger] 0.5
+# IMU interrupt is asynchronous, treat as false path into clk_sys
+set_false_path -from [get_ports imu_int1]
+
+# Frame-sync output skew budget toward U5/U9 (board fan-out limits the sub-100 ns
+# spec; FPGA-side delivery must be well under that).
+set_max_delay -to [get_ports fsin_fpga] 3.0
