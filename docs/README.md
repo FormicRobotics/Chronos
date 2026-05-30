@@ -9,6 +9,7 @@ Welcome to the Chronos documentation! This directory contains technical document
 | [🏗️ Architecture](architecture.md) | System design, block diagrams, data flow |
 | [📚 API Reference](api_reference.md) | Complete C API documentation with examples |
 | [📘 User Guide](user_guide.md) | Installation, configuration, troubleshooting |
+| [🔬 Hardware ↔ Firmware Audit](hardware_firmware_audit.md) | Pinout map, mismatches found, fixes applied |
 
 ## 🗺️ Quick Navigation
 
