@@ -1,6 +1,9 @@
 # Lattice node-locked license (machine-bound; never commit)
 license.dat
 
+# Altium auto-generated local history backups
+hardware/History/
+
 # Lattice Radiant build outputs (regenerated on every build)
 fpga/blinky/impl1/
 fpga/blinky/es20/
