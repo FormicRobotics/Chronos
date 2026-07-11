@@ -26,6 +26,7 @@ module chronos_top #(
     parameter int MAX_FRAME_RATE = 120
 )(
     input  wire clk_ref_12m,
+    input  wire clk_27m,        // X2 oscillator (U3-L5); forwarded to camera XCLKs
     input  wire rst_n,
 
     // Camera CSI-2 RX (four 2-lane MIPI inputs; D-PHY pads are bidirectional)
@@ -42,6 +43,7 @@ module chronos_top #(
 
     output logic                           fsin_fpga,
     output logic                           cam_resetn,
+    output wire  [NUM_CAMERAS-1:0]         cam_mclk,   // XCLK to each sensor (M3..M6)
 
     inout  wire  [NUM_CAMERAS-1:0]         cam_scl,
     inout  wire  [NUM_CAMERAS-1:0]         cam_sda,
@@ -79,6 +81,11 @@ module chronos_top #(
         .rst_n_async (rst_n & pll_locked),
         .rst_n_sync  (sys_rst_n)
     );
+
+    // Camera XCLK: forward the 27 MHz board oscillator to all four sensors.
+    // The SF-AOV9281 has no on-module oscillator; without XCLK it will not even
+    // respond on SCCB, so this runs unconditionally (not gated by cam_enable).
+    assign cam_mclk = {NUM_CAMERAS{clk_27m}};
 
     //==========================================================================
     // Control plane (clk_sys): host I2C slave + register bank + trigger gen
@@ -231,8 +238,14 @@ module chronos_top #(
                 .rd_data(buf_rd_data[i]), .empty(), .pkt_avail(buf_pkt_avail[i])
             );
 
-            // OV9281 SCCB configuration (per camera)
-            ov9281_init #(.CLK_HZ(200_000_000)) u_cam_cfg (
+            // OV9281 SCCB configuration (per camera).
+            // SCCB address follows the board's SID strapping (netlist Chronos.NET):
+            // J3-17 (cam0) and J5-17 (cam2) are grounded  -> SID=0 -> 7-bit 0x60;
+            // J4-17 (cam1) and J6-17 (cam3) are pulled to VCCIO6 -> SID=1 -> 0x10.
+            ov9281_init #(
+                .CLK_HZ  (200_000_000),
+                .DEV_ADDR((i % 2 == 0) ? 7'h60 : 7'h10)
+            ) u_cam_cfg (
                 .clk(clk_sys), .rst_n(sys_rst_n),
                 .start(cam_resetn & cam_enable[i]),
                 .scl(cam_scl[i]), .sda(cam_sda[i]),
@@ -297,12 +310,13 @@ module chronos_top #(
     assign uart_txd = uart_rxd;
 
     //==========================================================================
-    // Status LEDs (active-high via Q1..Q4)
+    // Status LEDs. ACTIVE-LOW: D3..D6 hang from VCCIO1 through R174..R177 and
+    // the FPGA pin sinks the cathode (netlist; same topology as D17/INITN).
     //==========================================================================
-    assign led_status[0] = pll_locked;
-    assign led_status[1] = |frame_pulse_sys;
-    assign led_status[2] = trigger_pulse;
-    assign led_status[3] = (|rx_error_sys) | (|buf_overflow_sys);
+    assign led_status[0] = ~pll_locked;
+    assign led_status[1] = ~|frame_pulse_sys;
+    assign led_status[2] = ~trigger_pulse;
+    assign led_status[3] = ~((|rx_error_sys) | (|buf_overflow_sys));
 
     /* verilator lint_off UNUSED */
     wire _unused = &{1'b0, clk_byte_unused, output_data_type, imu_int1_sync,

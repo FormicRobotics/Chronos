@@ -28,6 +28,27 @@ ldc_set_port -iobuf {IO_TYPE=LVCMOS18} [get_ports clk_ref_12m]
 create_clock -name clk_ref_12m -period 83.333 [get_ports clk_ref_12m]
 
 # ==============================================================================
+# 27 MHz camera clock oscillator (X2, ASE3-27.000MHz)
+# ------------------------------------------------------------------------------
+# X2 output -> R24 (22R series) -> FPGA L5. X2 is powered from VCCIO6 (1.8 V).
+# The FPGA forwards this clock to the four camera XCLK pins (below) — the
+# SF-AOV9281 modules have no on-board oscillator and require external XCLK.
+# ==============================================================================
+ldc_set_location -site {L5} [get_ports clk_27m]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18} [get_ports clk_27m]
+create_clock -name clk_27m -period 37.037 [get_ports clk_27m]
+
+# ==============================================================================
+# Camera XCLK outputs (netlist: CAMx_MCLK, 33R series to J3..J6 pin 19)
+#   CAM0_MCLK = M3   CAM1_MCLK = M4   CAM2_MCLK = M5   CAM3_MCLK = M6
+# ==============================================================================
+ldc_set_location -site {M3} [get_ports cam_mclk[0]]
+ldc_set_location -site {M4} [get_ports cam_mclk[1]]
+ldc_set_location -site {M5} [get_ports cam_mclk[2]]
+ldc_set_location -site {M6} [get_ports cam_mclk[3]]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=8 SLEWRATE=FAST} [get_ports cam_mclk[*]]
+
+# ==============================================================================
 # Global reset / user button
 # ------------------------------------------------------------------------------
 # GSRN (net) is the global set/reset.  It is driven by user button SW4
@@ -176,11 +197,13 @@ ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=UP OPENDRAIN=ON} \
 # Host configuration I2C (Jetson <-> FPGA over J7 sideband)
 # ------------------------------------------------------------------------------
 # Nets I2C_CON_SCL (G15) and I2C_CON_SDA (G14) come in on the J7 FPC alongside
-# CSI-TX.  Pulled up to VCCIO1 (1.8 V) by R53 / R54.
+# CSI-TX.  Pulled up to VCCIO1 by R53 / R54.  VCCIO1 = 3.3 V (bank 1 also hosts
+# the FT2232 JTAG/UART signals and their VCCIO1 pull-ups; J1-1 measures 3V3).
+# Verify once at TP_VCCIO1 before first power-up with the Jetson attached.
 # ==============================================================================
 ldc_set_location -site {G15} [get_ports host_i2c_scl]
 ldc_set_location -site {G14} [get_ports host_i2c_sda]
-ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=UP OPENDRAIN=ON} \
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP OPENDRAIN=ON} \
     [get_ports {host_i2c_scl host_i2c_sda}]
 
 # ==============================================================================
@@ -204,8 +227,9 @@ ldc_set_port -iobuf {IO_TYPE=LVCMOS18}                  [get_ports imu_miso]
 ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=DOWN}    [get_ports imu_int1]
 
 # ==============================================================================
-# Status LEDs (green, active-high through Q1..Q4 NPN drivers on the rev1 board
-# — net polarity is therefore "1" = LED on)
+# Status LEDs (green D3..D6, ACTIVE-LOW: anode -> R174..R177 -> VCCIO1, FPGA pin
+# sinks the cathode; "0" = LED on. Q1..Q6 NPN drivers serve the power-rail /
+# DONE indicator LEDs, NOT these user LEDs — netlist Chronos.NET.)
 # ------------------------------------------------------------------------------
 #   LED0 = E17   LED1 = F13   LED2 = G13   LED3 = F14
 # ==============================================================================
@@ -222,10 +246,11 @@ ldc_set_port -iobuf {IO_TYPE=LVCMOS33 DRIVE=4} [get_ports led_status[*]]
 #   RXD_UART = F18  (FPGA input,  FT2232 -> FPGA)
 #   TXD_UART = F16  (FPGA output, FPGA  -> FT2232)
 # ==============================================================================
+# Bank 1 (VCCIO1 = 3.3 V); the FT2232HL side is 3.3 V I/O.
 ldc_set_location -site {F18} [get_ports uart_rxd]
 ldc_set_location -site {F16} [get_ports uart_txd]
-ldc_set_port -iobuf {IO_TYPE=LVCMOS18 PULLMODE=UP}  [get_ports uart_rxd]
-ldc_set_port -iobuf {IO_TYPE=LVCMOS18 DRIVE=4}      [get_ports uart_txd]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 PULLMODE=UP}  [get_ports uart_rxd]
+ldc_set_port -iobuf {IO_TYPE=LVCMOS33 DRIVE=4}      [get_ports uart_txd]
 
 # ==============================================================================
 # Timing constraints
@@ -253,6 +278,7 @@ create_clock -name csi_tx_byte -period 10.0 [get_pins u_csi2_tx/u_dphy_tx/byte_c
 # the async frame_buffer FIFOs).
 set_clock_groups -asynchronous \
     -group [get_clocks clk_ref_12m] \
+    -group [get_clocks clk_27m] \
     -group [get_clocks clk_sys] \
     -group [get_clocks csi_rx_byte_0] \
     -group [get_clocks csi_rx_byte_1] \

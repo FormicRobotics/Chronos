@@ -6,16 +6,25 @@
 // (3 bytes/entry: reg hi, reg lo, value). Asserts cfg_done when finished.
 //
 // IMPORTANT: INIT_ROM below is a STRUCTURAL placeholder containing only the
-// reset/standby/stream-control registers. Paste the full Leopard LI-OV9281
-// register table between the marked rows for production. The sequencing
-// mechanism is complete.
+// reset/standby/stream-control registers. Paste the full OV9281 register table
+// between the marked rows for production. The sequencing mechanism is complete.
+//
+// Module: SincereFirst SF-AOV9281 (OV9281 CSP), connector AXT624124 mating the
+// board AXT524124 socket directly (see docs/sf_aov9281_direct_connect.md).
+//   * I2C address depends on the port's SID strap (netlist): J3/J5 (cam0/2)
+//     ground SID -> 0x60; J4/J6 (cam1/3) pull SID to VCCIO6 -> 0x10.
+//     chronos_top overrides DEV_ADDR per instance; the 0x60 below is only the
+//     parameter default.
+//   * XCLK = 27 MHz: the module is externally clocked; the FPGA forwards the
+//     X2 oscillator (L5 in, M3..M6 out), NOT 24 MHz. The pasted table's PLL
+//     registers MUST target a 27 MHz input clock for the intended link rate.
 //
 // Design point (see fpga/DESIGN_DECISIONS.md): 30 fps, SYNCHRONIZED via FPGA
-// FSIN. The pasted table MUST configure 1280x800 RAW10, 2-lane MIPI, AND put
-// the sensor in EXTERNAL-TRIGGER / slave-strobe mode (frame exposed per FSIN
-// pulse), with VTS (regs 0x380E/0x380F) large enough for the 30 fps window.
-// The frame *rate* itself comes from the FPGA trigger period, not free-running
-// sensor timing, so all four cameras stay frame-locked.
+// FSIN (conn pin 16). The pasted table MUST configure 1280x800 RAW10, 2-lane
+// MIPI, AND put the sensor in EXTERNAL-TRIGGER / slave-strobe mode (frame
+// exposed per FSIN pulse), with VTS (regs 0x380E/0x380F) large enough for the
+// 30 fps window. The frame *rate* itself comes from the FPGA trigger period,
+// not free-running sensor timing, so all four cameras stay frame-locked.
 //==============================================================================
 
 `timescale 1ns / 1ps
