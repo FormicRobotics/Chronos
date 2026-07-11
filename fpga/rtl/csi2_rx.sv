@@ -143,11 +143,17 @@ module csi2_rx #(
                     hist[gl] <= raw[gl];
                     if (!locked[gl]) begin
                         logic [15:0] win;
-                        win = {raw[gl], hist[gl]};
+                        logic        found;
+                        win   = {raw[gl], hist[gl]};
+                        found = 1'b0;
+                        // Lock onto the LOWEST bit offset whose byte == 0xB8.
+                        // 'found' guards against later offsets overwriting it
+                        // (without it, the highest matching offset would win).
                         for (int s = 0; s < 8; s++)
-                            if (win[s +: 8] == SYNC_BYTE) begin
+                            if (!found && (win[s +: 8] == SYNC_BYTE)) begin
                                 shift[gl]  <= s[2:0];
                                 locked[gl] <= 1'b1;
+                                found       = 1'b1;
                             end
                     end
                 end

@@ -4,6 +4,7 @@
 //------------------------------------------------------------------------------
 
 `timescale 1ns / 1ps
+`default_nettype none
 
 module i2c_slave #(
     parameter SLAVE_ADDR = 7'h3C
@@ -336,3 +337,5 @@ module i2c_slave #(
     assign sda = sda_oe ? sda_out : 1'bz;
 
 endmodule
+
+`default_nettype wire

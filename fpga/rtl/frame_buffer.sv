@@ -59,12 +59,6 @@ module frame_buffer #(
     function automatic logic [ADDR_WIDTH:0] bin2gray(input logic [ADDR_WIDTH:0] b);
         return b ^ (b >> 1);
     endfunction
-    function automatic logic [ADDR_WIDTH:0] gray2bin(input logic [ADDR_WIDTH:0] g);
-        logic [ADDR_WIDTH:0] b;
-        b[ADDR_WIDTH] = g[ADDR_WIDTH];
-        for (int i = ADDR_WIDTH-1; i >= 0; i--) b[i] = b[i+1] ^ g[i];
-        return b;
-    endfunction
 
     //--------------------------------------------------------------------------
     // Write domain
