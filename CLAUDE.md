@@ -24,13 +24,27 @@ This file is durable project memory. Update it when hard-won facts change.
 - Buttons: SW4 = GSRN (reset, active-low, pull-up R69). SW5 = PROGRAMN (config reset).
 - Jumpers for programming: JP1 open; the config-enable jumper must be fitted (lights D17
   red). JP2 closed feeds the 12 MHz reference clock to the FPGA.
-- Cameras: 4x Leopard Imaging LI-OV9281-MIPI (sensor OV9281) on connectors J3..J6.
-  - 1280x800 active, 10-bit RAW mono, 2 data lanes + clock, ~800 Mbps/lane, up to 120fps.
-  - 1.8V I/O, SCCB (I2C) config, FSIN frame-sync input, XCLK system clock from FPGA,
-    RESET active-low with internal pull-down (held in reset by default; FPGA must drive high).
-  - Each camera has its own dedicated I2C bus to the FPGA, so all can share one SCCB address.
+- Cameras: 4x SincereFirst SF-AOV9281 (sensor OV9281 CSP) on connectors J3..J6
+  (AXT524124 socket, module tail = AXT624124 — direct mate, no adapter).
+  Earlier candidates (Leopard LI-OV9281-MIPI, Waveshare OV9281-120) were dropped.
+  - 1280x800 active, 10-bit RAW mono, 2 data lanes + clock. Rails from board:
+    pin3=V1P8 (DOVDD), pin18=V1P2 (DVDD), pin22=V2P8 (AVDD) — netlist-verified.
+  - XCLK: the module has NO oscillator. 27 MHz osc X2 -> FPGA L5 (clk_27m); FPGA
+    forwards it to cam_mclk[3:0] = M3/M4/M5/M6 -> J3..J6 pin 19. No MCLK = no SCCB.
+  - SID strap (pin 17) is mixed: J3/J5 grounded -> SCCB 7-bit 0x60; J4/J6 pulled to
+    VCCIO6 -> 0x10. Each camera has a dedicated I2C bus; chronos_top sets DEV_ADDR
+    per instance.
+  - Module pins 13/14/20/23 (LPWM/GPIO2/STROBE/ULPM) are not connected on the board.
+  - FSIN: single FPGA pin R9 -> U5/U9 buffers (V1P8-powered) -> J3..J6 pin 16.
+    RESET: shared CAM_RESET, FPGA W18 -> all J*-21, active-low.
 - IMU: ICM-42688-P (IC1), SPI.
 - Reference clock: no crystal on the FPGA; 12 MHz from FT2232HL reaches FPGA pin L13 via JP2.
+  Separate 27 MHz oscillator X2 feeds FPGA pin L5 (camera XCLK source).
+- User LEDs LED0..3 (E17/F13/G13/F14) are ACTIVE-LOW: D3..D6 anodes hang from VCCIO1
+  via R174..R177, FPGA sinks the cathode. (Q1..Q6 NPNs drive power-rail/DONE LEDs, not
+  these.) Same topology as D17/INITN (red = config active).
+- Bank 1 (VCCIO1) is 3.3 V: it hosts JTAG pull-ups, UART to FT2232 (3.3 V I/O), LEDs,
+  GSRN and host I2C. PDC uses LVCMOS33 for all of them. Verify once at TP_VCCIO1.
 
 ---
 
@@ -88,40 +102,27 @@ rejected. Do NOT hand-patch the IDCODE - it invalidates the bitstream CRC ("Inva
 ## 4. Firmware: main design (fpga/rtl/) - current state
 
 Top: `fpga/rtl/chronos_top.sv`. Submodules: `csi2_rx.sv`, `csi2_tx.sv`, `frame_buffer.sv`,
-`tx_arbiter.sv`, `trigger_generator.sv`, `chronos_pll.sv`, `i2c_slave.sv`, `config_regs.sv`.
-Pinout: `fpga/constraints/chronos_pinout.pdc`.
+`tx_arbiter.sv`, `trigger_generator.sv`, `chronos_pll.sv`, `i2c_slave.sv`, `config_regs.sv`,
+`i2c_master.sv` + `ov9281_init.sv` (camera SCCB), `csi2_pkg.sv` (shared ECC/CRC), `cdc.sv`,
+`sync_fifo.sv`, wrappers `rtl/mipi/mipi_dphy_rx.v`/`mipi_dphy_tx.v` (Lattice IP).
+Pinout: `fpga/constraints/chronos_pinout.pdc`. Testbench: `fpga/sim/tb_chronos_csi2.sv`.
 
-STATUS: architectural skeleton, NOT functional/deployable. It will not capture or transmit
-any MIPI data as-is.
+STATUS after the MIPI rebuild (all old CRITICAL/HIGH issues fixed): real soft-RX/hard-TX
+D-PHY IP wrappers, per-camera recovered byte clocks, correct header/ECC/CRC via csi2_pkg,
+FWFT async frame_buffer with pkt_avail gating, token-based tx_arbiter, FPGA-driven OV9281
+SCCB init, per-port DEV_ADDR (SID), 27 MHz XCLK forwarding, active-low LED handling.
 
-### Known issues (from full review)
-CRITICAL:
-- D-PHY is an empty placeholder. `dphy_rx_wrapper`/`dphy_tx_wrapper` (in csi2_rx.sv/csi2_tx.sv)
-  do nothing: `sync_detected`/`lane_valid` stay 0, so the RX FSM never leaves IDLE. No real
-  Lattice DPHY hard/soft IP is instantiated.
-- clk_byte is a single PLL output shared by all 4 RX instances; real CSI-2 RX needs each
-  camera's recovered byte clock from its own D-PHY.
-
-HIGH (datapath bugs even with real D-PHY):
-- csi2_rx header assembly duplicates the same 2 bytes (csi2_rx.sv ~178-180) -> wrong DT/WC/ECC.
-- Multi-lane CRC: `for (i...) crc_reg <= crc16_ccitt(crc_reg, lane_data[i])` keeps only the
-  last lane (non-blocking in a loop). Present in csi2_rx.sv ~290-291 and csi2_tx.sv ~260.
-- frame_buffer is not first-word-fall-through, but tx_arbiter reads head metadata at ST_SELECT
-  before any read -> stale metadata (tx_arbiter.sv ~186-192).
-- word_count/byte accounting conflates CSI-2 byte count, 32-bit entries, and FIFO entries
-  (tx_arbiter.sv ~204-209).
-
-MEDIUM:
-- Raw `PLL_CORE` instance in chronos_pll.sv may not match Radiant IP wrapper port/param names.
-- PDC references non-existent pins: `u_csi_rx_0/u_dphy/byte_clk`, `u_trigger_gen/fsin_pulse_reg/Q`
-  (chronos_pinout.pdc ~242-263). Real hierarchy is `gen_csi_rx[i].u_csi2_rx/...`.
-- i2c_slave loads reg_rdata one cycle before config_regs registers it -> first read byte stale.
-- No camera SCCB master: `cam_scl/sda` are tied to `1'bz` (chronos_top.sv ~397-400). Cameras
-  are never configured, so they never stream. A camera I2C master + OV9281 init is required.
-- clk_ref_12m IO_TYPE=LVCMOS18 - verify the 12 MHz net voltage/bank against the schematic.
-
-GOOD parts to keep: config_regs (register map), trigger_generator (single-pin FSIN fan-out is
-correct for this board), i2c_slave FSM, and the physical pin assignments in the PDC.
+### Remaining known items
+- ov9281_init INIT_ROM is a structural placeholder: paste the production OV9281 register
+  table (1280x800 RAW10, 2-lane, PLL for 27 MHz XCLK, external-trigger/FSIN mode, VTS for
+  30 fps) between the marked rows.
+- mipi_dphy_tx CM/CN/CO divider parameters are placeholders; take them from an IP Catalog
+  run for the chosen clk_ref and line rate before synthesis.
+- i2c_slave loads reg_rdata one cycle before config_regs registers it -> first host READ
+  byte can be stale; auto-increment multi-byte reads off-by-one. Writes unaffected. Fix
+  needs sim validation (make config_regs read combinational or rework slave load timing).
+- Simulation not yet run locally (no simulator installed); tb_chronos_csi2 is ready for
+  ModelSim/Questa.
 
 ### Bandwidth ceiling (hard constraint)
 4 cams x 2 lanes x 800 Mbps = 6.4 Gbps input. TX to Jetson is 2 lanes; hard D-PHY ~2.5 Gbps/lane
@@ -149,6 +150,8 @@ Detailed plan: `.cursor/plans/chronos_mipi_rebuild_*.plan.md`.
 
 - Build with Radiant 2.0 SP1 (LSE, Verilog-2001 for the ES flow); program with 2025.2 Programmer.
 - Keep imports/instantiations clean; no inline imports (workspace rule).
-- Netlist source of truth: `hardware/Chronos.net` (Altium). Verify pin sites there before
-  changing the PDC - wrong BGA sites can short power rails or break D-PHY constraints.
+- Netlist source of truth: `hardware/Project Outputs for Chronos/ProtelNetlist/Chronos.NET`
+  (Altium/Protel export). Verify pin sites there before changing the PDC - wrong BGA sites
+  can short power rails or break D-PHY constraints. All PDC camera/TX/I2C/LED/FSIN sites
+  were re-verified against it (2026-07); 27 MHz L5 + MCLK M3..M6 + SID straps came from it.
 - Do not hand-edit bitstream IDCODE/CRC; generate native ES bitstreams from Radiant 2.0 SP1.

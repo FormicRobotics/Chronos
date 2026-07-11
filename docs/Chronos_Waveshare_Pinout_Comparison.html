@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chronos vs Waveshare OV9281-120 - Pinout Comparison</title>
+<style>
+  @page { size: A4; margin: 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #1a1a1a; font-size: 10.5px; line-height: 1.4; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  h2 { font-size: 12.5px; margin: 14px 0 5px; padding-bottom: 3px; border-bottom: 1.5px solid #2a4d7a; color: #2a4d7a; }
+  .sub { color: #555; font-size: 10px; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+  th, td { border: 1px solid #c9c9c9; padding: 3px 6px; text-align: left; vertical-align: top; }
+  th { background: #2a4d7a; color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: #f4f6f9; }
+  .ok   { color: #1a7d3c; font-weight: 600; }
+  .warn { color: #b06a00; font-weight: 600; }
+  .no   { color: #c01616; font-weight: 700; }
+  .fsin td { background: #fde8e8 !important; }
+  .two { display: flex; gap: 14px; }
+  .two > div { flex: 1; }
+  .note { background: #f4f6f9; border-left: 4px solid #2a4d7a; padding: 8px 10px; margin-top: 6px; font-size: 10px; }
+  .muted { color: #777; }
+  .foot { margin-top: 12px; font-size: 8.5px; color: #888; text-align: center; }
+</style>
+</head>
+<body>
+
+  <h1>Camera Connector / Pinout Comparison</h1>
+  <div class="sub">Chronos <b>HW_CHRONOS_R1</b> (Panasonic AXT524124) &nbsp;vs&nbsp; Waveshare <b>OV9281-120</b> (Raspberry Pi 15-pin FFC)</div>
+
+  <h2>Key finding</h2>
+  <div class="note">
+    The Waveshare OV9281-120 uses the standard Raspberry Pi 15-pin CSI interface.
+    This connector <b class="no">does NOT provide an FSIN (frame-sync / external-trigger) pin</b>,
+    and the module free-runs on its own on-board 24&nbsp;MHz oscillator.
+    Chronos requires FSIN to capture all 4 cameras in hardware sync (global-shutter, simultaneous).
+    Hardware sync with this module is therefore only possible by soldering a wire to the OV9281
+    FSIN pad on the Waveshare PCB. A module that breaks FSIN out on the connector (e.g. Arducam
+    with FSIN/STROBE header) avoids this.
+  </div>
+
+  <h2>Signal comparison</h2>
+  <table>
+    <tr><th>Function</th><th>Chronos AXT524124 (pin)</th><th>Waveshare RPi 15-pin (pin)</th><th>Status</th></tr>
+    <tr><td>MIPI Clock +/-</td><td>4 / 5</td><td>9 / 8</td><td class="ok">Present (compatible)</td></tr>
+    <tr><td>MIPI Data Lane 0 +/-</td><td>7 / 8</td><td>3 / 2</td><td class="ok">Present</td></tr>
+    <tr><td>MIPI Data Lane 1 +/-</td><td>10 / 11</td><td>6 / 5</td><td class="ok">Present</td></tr>
+    <tr><td>MIPI Data Lane 2 +/-</td><td>13 / 14</td><td>&mdash;</td><td class="warn">Not on Waveshare (2-lane)</td></tr>
+    <tr><td>MIPI Data Lane 3 +/-</td><td>20 / 23</td><td>&mdash;</td><td class="warn">Not on Waveshare (2-lane)</td></tr>
+    <tr><td>SCCB SCL / SDA</td><td>2 / 1 (1.8 V)</td><td>13 / 14 (3.3 V)</td><td class="warn">Present, different voltage</td></tr>
+    <tr class="fsin"><td><b>FSIN (hardware sync)</b></td><td><b>16 (1.8 V)</b></td><td><b>&mdash; (none)</b></td><td class="no">NOT on Waveshare connector</td></tr>
+    <tr><td>XCLK / MCLK (sensor clock)</td><td>19</td><td>&mdash;</td><td class="warn">Waveshare self-clocked (24 MHz)</td></tr>
+    <tr><td>Camera Reset</td><td>21 (CAM_RESET)</td><td>&mdash; (POWER-EN pin 11)</td><td class="warn">Different</td></tr>
+    <tr><td>Power</td><td>2.8 V (18), 1.8 V (22), 1.2 V (3)</td><td>single 3.3 V (15)</td><td class="warn">Different power scheme</td></tr>
+    <tr><td>POWER-EN</td><td>&mdash;</td><td>11</td><td class="muted">Waveshare only</td></tr>
+    <tr><td>LED-EN</td><td>&mdash;</td><td>12</td><td class="muted">Waveshare only</td></tr>
+    <tr><td>GND / AGND</td><td>6, 9, 12, 15, 17, 24 (+25-28)</td><td>1, 4, 7, 10</td><td class="ok">Present</td></tr>
+  </table>
+
+  <h2>Full pinout reference</h2>
+  <div class="two">
+    <div>
+      <table>
+        <tr><th colspan="2">Chronos AXT524124 (CAM0 = J3)</th></tr>
+        <tr><td>1</td><td>CAM0_SDA (1.8 V)</td></tr>
+        <tr><td>2</td><td>CAM0_SCL (1.8 V)</td></tr>
+        <tr><td>3</td><td>Supply ~1.2 V</td></tr>
+        <tr><td>4 / 5</td><td>CAM0_CLK_P / _N</td></tr>
+        <tr><td>6</td><td>GND</td></tr>
+        <tr><td>7 / 8</td><td>CAM0_D0_P / _N</td></tr>
+        <tr><td>9</td><td>GND</td></tr>
+        <tr><td>10 / 11</td><td>CAM0_D1_P / _N</td></tr>
+        <tr><td>12</td><td>GND</td></tr>
+        <tr><td>13 / 14</td><td>CAM0_D2_P / _N (unused)</td></tr>
+        <tr><td>15</td><td>AGND</td></tr>
+        <tr class="fsin"><td>16</td><td><b>FSIN0 (1.8 V)</b></td></tr>
+        <tr><td>17</td><td>GND</td></tr>
+        <tr><td>18</td><td>Supply ~2.8 V</td></tr>
+        <tr><td>19</td><td>CAM0_MCLK</td></tr>
+        <tr><td>20 / 23</td><td>CAM0_D3_P / _N (unused)</td></tr>
+        <tr><td>21</td><td>CAM_RESET</td></tr>
+        <tr><td>22</td><td>Supply ~1.8 V</td></tr>
+        <tr><td>24 / 25-28</td><td>GND / mounting</td></tr>
+      </table>
+    </div>
+    <div>
+      <table>
+        <tr><th colspan="2">Waveshare OV9281-120 (RPi 15-pin)</th></tr>
+        <tr><td>1</td><td>GND</td></tr>
+        <tr><td>2</td><td>MDN0 (D0-)</td></tr>
+        <tr><td>3</td><td>MDP0 (D0+)</td></tr>
+        <tr><td>4</td><td>GND</td></tr>
+        <tr><td>5</td><td>MDN1 (D1-)</td></tr>
+        <tr><td>6</td><td>MDP1 (D1+)</td></tr>
+        <tr><td>7</td><td>GND</td></tr>
+        <tr><td>8</td><td>MCN (CLK-)</td></tr>
+        <tr><td>9</td><td>MCP (CLK+)</td></tr>
+        <tr><td>10</td><td>GND</td></tr>
+        <tr><td>11</td><td>POWER-EN</td></tr>
+        <tr><td>12</td><td>LED-EN</td></tr>
+        <tr><td>13</td><td>SCL (3.3 V)</td></tr>
+        <tr><td>14</td><td>SDA (3.3 V)</td></tr>
+        <tr><td>15</td><td>VCC 3.3 V</td></tr>
+        <tr><td colspan="2" class="muted">No FSIN / XCLK / reset pins.</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="foot">Chronos HW_CHRONOS_R1 &mdash; camera connector comparison. Connector: Panasonic AXT524124 (F4S, 0.4 mm, 24-pin) &middot; mating header AXT624124.</div>
+
+</body>
+</html>
