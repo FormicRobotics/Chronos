@@ -1,8 +1,41 @@
 ** Drc report for chronos_helios_adapter.kicad_pcb **
-** Created on 2026-07-16T14:06:57 **
-** Report includes: Errors **
+** Created on 2026-07-16T14:56:57 **
+** Report includes: Errors, Warnings, Exclusions **
 
-** Found 0 DRC violations **
+** Found 11 DRC violations **
+[lib_footprint_mismatch]: Footprint 'TestPoint_Pad_D1.5mm' does not match copy in library 'TestPoint'
+    Local override; warning
+    @(104.8000 mm, 116.0000 mm): Footprint TP1
+[lib_footprint_mismatch]: Footprint 'Hirose_FH12-22S-0.5SH_1x22-1MP_P0.50mm_Horizontal' does not match copy in library 'Connector_FFC-FPC'
+    Local override; warning
+    @(112.0000 mm, 119.0000 mm): Footprint J1
+[lib_footprint_mismatch]: Footprint 'TestPoint_Pad_D1.5mm' does not match copy in library 'TestPoint'
+    Local override; warning
+    @(105.3000 mm, 110.1000 mm): Footprint TP4
+[lib_footprint_mismatch]: Footprint 'MountingHole_2.2mm_M2' does not match copy in library 'MountingHole'
+    Local override; warning
+    @(123.7000 mm, 123.7000 mm): Footprint H4
+[lib_footprint_mismatch]: Footprint 'TestPoint_Pad_D1.5mm' does not match copy in library 'TestPoint'
+    Local override; warning
+    @(106.2000 mm, 107.8500 mm): Footprint TP3
+[lib_footprint_mismatch]: Footprint 'Hirose_FH12-15S-0.5SH_1x15-1MP_P0.50mm_Horizontal' does not match copy in library 'Connector_FFC-FPC'
+    Local override; warning
+    @(112.0000 mm, 106.0000 mm): Footprint J2
+[lib_footprint_mismatch]: Footprint 'MountingHole_2.2mm_M2' does not match copy in library 'MountingHole'
+    Local override; warning
+    @(100.3000 mm, 123.7000 mm): Footprint H3
+[lib_footprint_mismatch]: Footprint 'MountingHole_2.2mm_M2' does not match copy in library 'MountingHole'
+    Local override; warning
+    @(100.3000 mm, 100.3000 mm): Footprint H1
+[lib_footprint_mismatch]: Footprint 'TestPoint_Pad_D1.5mm' does not match copy in library 'TestPoint'
+    Local override; warning
+    @(117.6000 mm, 107.8500 mm): Footprint TP2
+[lib_footprint_issues]: Footprint 'SolderJumper-2_P1.3mm_Open' not found in library 'Jumper'
+    Local override; warning
+    @(103.5000 mm, 110.1000 mm): Footprint SJ1
+[lib_footprint_mismatch]: Footprint 'MountingHole_2.2mm_M2' does not match copy in library 'MountingHole'
+    Local override; warning
+    @(123.7000 mm, 100.3000 mm): Footprint H2
 
 ** Found 0 unconnected pads **
 
