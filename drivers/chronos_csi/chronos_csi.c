@@ -1,674 +1,302 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Chronos Multi-Camera CSI Driver
+ * Chronos CSI-2 bridge subdevice
  *
- * Copyright (C) 2025 Chronos Project
+ * Copyright (C) 2026 Chronos Project
  *
- * This driver interfaces with the NVIDIA NVCSI subsystem and
- * demultiplexes virtual channel streams to separate video devices.
+ * On the Chronos board a Lattice CrossLink-NX FPGA aggregates four OV9281
+ * cameras (1280x800 RAW10 monochrome, FSIN hardware-triggered, 30 fps
+ * design point) into ONE 2-lane MIPI CSI-2 link to the Jetson Orin NX,
+ * with virtual channels VC0..VC3 (VC = camera index).  The Jetson sees a
+ * single CSI-2 source; it cannot reach the sensors over I2C (the FPGA owns
+ * per-camera private SCCB buses and configures the sensors itself).
+ *
+ * This driver is an honest model of that: a single media-controller V4L2
+ * SUBDEV that represents the FPGA's aggregated CSI-2 source toward NVCSI.
+ * It creates NO video nodes and owns NO buffers - the Tegra VI driver
+ * creates the /dev/video nodes and handles DMA.  Per-VC routing is
+ * configured through the tegra-camera-platform modules and the VI channel
+ * setup in the device tree (four VI channels with vc-id 0..3, all fed by
+ * the same NVCSI stream); this subdev is the single source entity of that
+ * graph.
+ *
+ * The only runtime control the bridge performs is starting/stopping the
+ * FPGA's FSIN trigger generator (via the chronos_fpga in-kernel API) when
+ * the first stream starts / the last stream stops.
  */
 
+#include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/platform_device.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/interrupt.h>
-#include <linux/clk.h>
-#include <linux/io.h>
-#include <linux/dma-mapping.h>
+#include <linux/platform_device.h>
+#include <linux/version.h>
 
+#include <media/media-entity.h>
+#include <media/v4l2-async.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
-#include <media/v4l2-ioctl.h>
-#include <media/v4l2-ctrls.h>
-#include <media/v4l2-event.h>
-#include <media/videobuf2-dma-contig.h>
 
-#define CHRONOS_DRIVER_NAME     "chronos-csi"
-#define CHRONOS_MAX_CAMERAS     4
-#define CHRONOS_BUF_COUNT       4
+#include "../chronos_fpga/chronos_fpga.h"
 
-/* Virtual Channel IDs */
-#define VC_CAM0     0
-#define VC_CAM1     1
-#define VC_CAM2     2
-#define VC_CAM3     3
+#define CHRONOS_BRIDGE_NAME	"chronos-csi-bridge"
 
-/* Frame format */
-#define CHRONOS_WIDTH       1280
-#define CHRONOS_HEIGHT      800
-#define CHRONOS_BPP         2       /* 10-bit packed to 16-bit */
-#define CHRONOS_FRAME_SIZE  (CHRONOS_WIDTH * CHRONOS_HEIGHT * CHRONOS_BPP)
+/* Fixed output format of the FPGA CSI-2 TX (per virtual channel). */
+#define CHRONOS_WIDTH		1280
+#define CHRONOS_HEIGHT		800
+#define CHRONOS_MBUS_CODE	MEDIA_BUS_FMT_Y10_1X10
 
-/* Chronos FPGA I2C configuration */
-#define CHRONOS_FPGA_I2C_ADDR   0x3C
+/*
+ * The pad-op signature changed in 5.14 (v4l2_subdev_pad_config was folded
+ * into v4l2_subdev_state).  L4T r35 is 5.10, r36 is 5.15, so support both.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+#define chronos_sd_state	v4l2_subdev_pad_config
+#else
+#define chronos_sd_state	v4l2_subdev_state
+#endif
 
-/* FPGA Register offsets */
-#define FPGA_REG_CTRL           0x00
-#define FPGA_REG_FRAME_RATE     0x01
-#define FPGA_REG_STATUS         0x20
-#define FPGA_REG_ERROR          0x21
+struct chronos_bridge {
+	struct device *dev;
+	struct v4l2_subdev sd;
+	struct media_pad pad;		/* single source pad toward NVCSI */
 
-struct chronos_buffer {
-    struct vb2_v4l2_buffer vb;
-    struct list_head list;
-    dma_addr_t dma_addr;
+	/* FPGA control client, resolved from the "fpga" phandle in probe. */
+	struct i2c_client *fpga_client;
+
+	/* Protects stream_count and the FPGA trigger writes. */
+	struct mutex lock;
+	int stream_count;
 };
 
-struct chronos_channel {
-    struct video_device vdev;
-    struct vb2_queue vb2_queue;
-    struct v4l2_pix_format pix_fmt;
-    
-    struct mutex lock;
-    spinlock_t qlock;
-    
-    struct list_head buf_list;
-    struct chronos_buffer *active_buf;
-    
-    unsigned int sequence;
-    bool streaming;
-    
-    int vc_id;  /* Virtual Channel ID */
-    struct chronos_dev *parent;
+static inline struct chronos_bridge *to_bridge(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct chronos_bridge, sd);
+}
+
+/* ---------------------------------------------------------------------------
+ * Pad operations - fixed 1280x800 Y10 source
+ * ------------------------------------------------------------------------- */
+
+static void chronos_fill_fmt(struct v4l2_mbus_framefmt *fmt)
+{
+	fmt->width = CHRONOS_WIDTH;
+	fmt->height = CHRONOS_HEIGHT;
+	fmt->code = CHRONOS_MBUS_CODE;
+	fmt->field = V4L2_FIELD_NONE;
+	fmt->colorspace = V4L2_COLORSPACE_RAW;
+	fmt->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
+	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
+}
+
+static int chronos_enum_mbus_code(struct v4l2_subdev *sd,
+				  struct chronos_sd_state *state,
+				  struct v4l2_subdev_mbus_code_enum *code)
+{
+	if (code->index > 0)
+		return -EINVAL;
+
+	code->code = CHRONOS_MBUS_CODE;
+	return 0;
+}
+
+static int chronos_get_fmt(struct v4l2_subdev *sd,
+			   struct chronos_sd_state *state,
+			   struct v4l2_subdev_format *fmt)
+{
+	chronos_fill_fmt(&fmt->format);
+	return 0;
+}
+
+/*
+ * The FPGA output is not configurable from the host; set_fmt always
+ * returns the fixed hardware format regardless of what was requested.
+ */
+static int chronos_set_fmt(struct v4l2_subdev *sd,
+			   struct chronos_sd_state *state,
+			   struct v4l2_subdev_format *fmt)
+{
+	chronos_fill_fmt(&fmt->format);
+	return 0;
+}
+
+static const struct v4l2_subdev_pad_ops chronos_pad_ops = {
+	.enum_mbus_code = chronos_enum_mbus_code,
+	.get_fmt = chronos_get_fmt,
+	.set_fmt = chronos_set_fmt,
 };
 
-struct chronos_dev {
-    struct device *dev;
-    struct platform_device *pdev;
-    
-    struct v4l2_device v4l2_dev;
-    struct media_device mdev;
-    
-    /* I2C client for FPGA communication */
-    struct i2c_client *fpga_client;
-    
-    /* Per-camera channels */
-    struct chronos_channel channels[CHRONOS_MAX_CAMERAS];
-    
-    /* Clocks */
-    struct clk *clk_csi;
-    
-    /* Statistics */
-    u64 frame_count[CHRONOS_MAX_CAMERAS];
-    u64 error_count;
-    
-    /* Synchronization tracking */
-    ktime_t last_trigger_time;
-    bool sync_active;
+/* ---------------------------------------------------------------------------
+ * Video operations - FSIN trigger start/stop
+ * ------------------------------------------------------------------------- */
+
+static int chronos_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct chronos_bridge *bridge = to_bridge(sd);
+	int ret = 0;
+
+	mutex_lock(&bridge->lock);
+
+	if (enable) {
+		/*
+		 * The VI driver calls s_stream once per VI channel; only the
+		 * first one actually starts the FPGA trigger generator.
+		 */
+		if (bridge->stream_count == 0) {
+			ret = chronos_fpga_trigger_enable(bridge->fpga_client,
+							  true);
+			if (ret) {
+				dev_err(bridge->dev,
+					"failed to enable FPGA trigger: %d\n",
+					ret);
+				goto unlock;
+			}
+			dev_dbg(bridge->dev, "FSIN trigger enabled\n");
+		}
+		bridge->stream_count++;
+	} else {
+		if (WARN_ON(bridge->stream_count == 0))
+			goto unlock;
+
+		bridge->stream_count--;
+		if (bridge->stream_count == 0) {
+			ret = chronos_fpga_trigger_enable(bridge->fpga_client,
+							  false);
+			if (ret)
+				dev_warn(bridge->dev,
+					 "failed to disable FPGA trigger: %d\n",
+					 ret);
+			else
+				dev_dbg(bridge->dev, "FSIN trigger disabled\n");
+			/* Stream is stopping either way. */
+			ret = 0;
+		}
+	}
+
+unlock:
+	mutex_unlock(&bridge->lock);
+	return ret;
+}
+
+static const struct v4l2_subdev_video_ops chronos_video_ops = {
+	.s_stream = chronos_s_stream,
 };
 
-/* ============================================================================
- * FPGA Communication
- * ============================================================================ */
-
-static int chronos_fpga_read_reg(struct chronos_dev *cdev, u8 reg, u8 *val)
-{
-    struct i2c_msg msgs[2];
-    int ret;
-    
-    if (!cdev->fpga_client)
-        return -ENODEV;
-    
-    msgs[0].addr = cdev->fpga_client->addr;
-    msgs[0].flags = 0;
-    msgs[0].len = 1;
-    msgs[0].buf = &reg;
-    
-    msgs[1].addr = cdev->fpga_client->addr;
-    msgs[1].flags = I2C_M_RD;
-    msgs[1].len = 1;
-    msgs[1].buf = val;
-    
-    ret = i2c_transfer(cdev->fpga_client->adapter, msgs, 2);
-    return (ret == 2) ? 0 : -EIO;
-}
-
-static int chronos_fpga_write_reg(struct chronos_dev *cdev, u8 reg, u8 val)
-{
-    u8 buf[2] = { reg, val };
-    int ret;
-    
-    if (!cdev->fpga_client)
-        return -ENODEV;
-    
-    ret = i2c_master_send(cdev->fpga_client, buf, 2);
-    return (ret == 2) ? 0 : -EIO;
-}
-
-static int chronos_fpga_set_trigger_enable(struct chronos_dev *cdev, bool enable)
-{
-    u8 ctrl;
-    int ret;
-    
-    ret = chronos_fpga_read_reg(cdev, FPGA_REG_CTRL, &ctrl);
-    if (ret)
-        return ret;
-    
-    if (enable)
-        ctrl |= 0x01;
-    else
-        ctrl &= ~0x01;
-    
-    return chronos_fpga_write_reg(cdev, FPGA_REG_CTRL, ctrl);
-}
-
-static int chronos_fpga_set_frame_rate(struct chronos_dev *cdev, u8 fps)
-{
-    return chronos_fpga_write_reg(cdev, FPGA_REG_FRAME_RATE, fps);
-}
-
-/* ============================================================================
- * Video Buffer Operations
- * ============================================================================ */
-
-static int chronos_queue_setup(struct vb2_queue *vq,
-                               unsigned int *nbuffers,
-                               unsigned int *nplanes,
-                               unsigned int sizes[],
-                               struct device *alloc_devs[])
-{
-    struct chronos_channel *ch = vb2_get_drv_priv(vq);
-    
-    if (*nplanes) {
-        if (sizes[0] < CHRONOS_FRAME_SIZE)
-            return -EINVAL;
-        return 0;
-    }
-    
-    *nplanes = 1;
-    sizes[0] = CHRONOS_FRAME_SIZE;
-    
-    if (*nbuffers < CHRONOS_BUF_COUNT)
-        *nbuffers = CHRONOS_BUF_COUNT;
-    
-    dev_dbg(ch->parent->dev, "VC%d: Queue setup: %d buffers, size %u\n",
-            ch->vc_id, *nbuffers, sizes[0]);
-    
-    return 0;
-}
-
-static int chronos_buf_prepare(struct vb2_buffer *vb)
-{
-    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
-    struct chronos_channel *ch = vb2_get_drv_priv(vb->vb2_queue);
-    struct chronos_buffer *buf = container_of(vbuf, struct chronos_buffer, vb);
-    
-    if (vb2_plane_size(vb, 0) < CHRONOS_FRAME_SIZE) {
-        dev_err(ch->parent->dev, "Buffer too small: %lu < %u\n",
-                vb2_plane_size(vb, 0), CHRONOS_FRAME_SIZE);
-        return -EINVAL;
-    }
-    
-    vb2_set_plane_payload(vb, 0, CHRONOS_FRAME_SIZE);
-    
-    buf->dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
-    
-    return 0;
-}
-
-static void chronos_buf_queue(struct vb2_buffer *vb)
-{
-    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
-    struct chronos_channel *ch = vb2_get_drv_priv(vb->vb2_queue);
-    struct chronos_buffer *buf = container_of(vbuf, struct chronos_buffer, vb);
-    unsigned long flags;
-    
-    spin_lock_irqsave(&ch->qlock, flags);
-    list_add_tail(&buf->list, &ch->buf_list);
-    spin_unlock_irqrestore(&ch->qlock, flags);
-}
-
-static int chronos_count_streaming(struct chronos_dev *cdev)
-{
-    int n = 0, i;
-    for (i = 0; i < CHRONOS_MAX_CAMERAS; ++i)
-        if (cdev->channels[i].streaming)
-            ++n;
-    return n;
-}
-
-static int chronos_start_streaming(struct vb2_queue *vq, unsigned int count)
-{
-    struct chronos_channel *ch = vb2_get_drv_priv(vq);
-    struct chronos_dev *cdev = ch->parent;
-    int ret;
-
-    dev_info(cdev->dev, "VC%d: Start streaming\n", ch->vc_id);
-
-    ch->sequence  = 0;
-    ch->streaming = true;
-
-    /*
-     * Enable the FPGA's frame-sync generator the first time *any* channel
-     * is opened.  Applications routinely stream cameras independently, so
-     * the previous "only VC0 controls the trigger" rule prevented other
-     * cameras from ever receiving FSIN.
-     */
-    if (chronos_count_streaming(cdev) == 1) {
-        /*
-         * The platform node does not own the I2C client to the FPGA — the
-         * user-space library and an i2c-attach driver each push register
-         * writes.  If neither is bound yet, silently continue: the trigger
-         * may already be running from a previous attach.
-         */
-        ret = chronos_fpga_set_trigger_enable(cdev, true);
-        if (ret == -ENODEV) {
-            dev_info(cdev->dev,
-                     "FPGA I2C client not bound, skipping trigger enable\n");
-        } else if (ret) {
-            dev_err(cdev->dev, "Failed to enable FPGA trigger (%d)\n", ret);
-            ch->streaming = false;
-            return ret;
-        }
-        cdev->sync_active = true;
-    }
-
-    return 0;
-}
-
-static void chronos_stop_streaming(struct vb2_queue *vq)
-{
-    struct chronos_channel *ch = vb2_get_drv_priv(vq);
-    struct chronos_dev *cdev = ch->parent;
-    struct chronos_buffer *buf, *tmp;
-    unsigned long flags;
-
-    dev_info(cdev->dev, "VC%d: Stop streaming\n", ch->vc_id);
-
-    ch->streaming = false;
-
-    /* Disable the trigger only when the last consumer goes away. */
-    if (chronos_count_streaming(cdev) == 0) {
-        chronos_fpga_set_trigger_enable(cdev, false);
-        cdev->sync_active = false;
-    }
-
-    spin_lock_irqsave(&ch->qlock, flags);
-
-    if (ch->active_buf) {
-        vb2_buffer_done(&ch->active_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-        ch->active_buf = NULL;
-    }
-
-    list_for_each_entry_safe(buf, tmp, &ch->buf_list, list) {
-        list_del(&buf->list);
-        vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-    }
-
-    spin_unlock_irqrestore(&ch->qlock, flags);
-}
-
-static const struct vb2_ops chronos_vb2_ops = {
-    .queue_setup     = chronos_queue_setup,
-    .buf_prepare     = chronos_buf_prepare,
-    .buf_queue       = chronos_buf_queue,
-    .start_streaming = chronos_start_streaming,
-    .stop_streaming  = chronos_stop_streaming,
-    .wait_prepare    = vb2_ops_wait_prepare,
-    .wait_finish     = vb2_ops_wait_finish,
+static const struct v4l2_subdev_ops chronos_subdev_ops = {
+	.video = &chronos_video_ops,
+	.pad = &chronos_pad_ops,
 };
 
-/* ============================================================================
- * V4L2 IOCTLs
- * ============================================================================ */
+/* ---------------------------------------------------------------------------
+ * Probe / remove
+ * ------------------------------------------------------------------------- */
 
-static int chronos_querycap(struct file *file, void *priv,
-                            struct v4l2_capability *cap)
+static int chronos_bridge_probe(struct platform_device *pdev)
 {
-    struct chronos_channel *ch = video_drvdata(file);
-    
-    strscpy(cap->driver, CHRONOS_DRIVER_NAME, sizeof(cap->driver));
-    snprintf(cap->card, sizeof(cap->card), "Chronos Camera %d", ch->vc_id);
-    snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:chronos-csi.%d",
-             ch->vc_id);
-    
-    return 0;
+	struct device *dev = &pdev->dev;
+	struct device_node *fpga_np;
+	struct chronos_bridge *bridge;
+	struct i2c_client *client;
+	int ret;
+
+	bridge = devm_kzalloc(dev, sizeof(*bridge), GFP_KERNEL);
+	if (!bridge)
+		return -ENOMEM;
+
+	bridge->dev = dev;
+	mutex_init(&bridge->lock);
+	platform_set_drvdata(pdev, bridge);
+
+	/* Resolve the FPGA control client from the "fpga" phandle. */
+	fpga_np = of_parse_phandle(dev->of_node, "fpga", 0);
+	if (!fpga_np)
+		return dev_err_probe(dev, -EINVAL,
+				     "missing 'fpga' phandle in DT\n");
+
+	client = chronos_fpga_get_client(fpga_np);
+	of_node_put(fpga_np);
+	if (IS_ERR(client))
+		return dev_err_probe(dev, PTR_ERR(client),
+				     "FPGA control driver not ready\n");
+	bridge->fpga_client = client;
+
+	v4l2_subdev_init(&bridge->sd, &chronos_subdev_ops);
+	bridge->sd.owner = THIS_MODULE;
+	bridge->sd.dev = dev;
+	bridge->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	snprintf(bridge->sd.name, sizeof(bridge->sd.name), "%s %s",
+		 CHRONOS_BRIDGE_NAME, dev_name(dev));
+	v4l2_set_subdevdata(&bridge->sd, bridge);
+
+	/*
+	 * The bridge acts as the "sensor" of the Tegra capture graph: one
+	 * source pad feeding NVCSI port A.
+	 */
+	bridge->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	bridge->pad.flags = MEDIA_PAD_FL_SOURCE;
+	ret = media_entity_pads_init(&bridge->sd.entity, 1, &bridge->pad);
+	if (ret) {
+		dev_err(dev, "failed to init media entity: %d\n", ret);
+		goto err_put_client;
+	}
+
+	/*
+	 * Async registration: the Tegra VI/NVCSI notifier matches this
+	 * subdev through the DT endpoint (bridge port -> nvcsi port@0).
+	 */
+	bridge->sd.fwnode = of_fwnode_handle(dev->of_node);
+	ret = v4l2_async_register_subdev(&bridge->sd);
+	if (ret) {
+		dev_err(dev, "failed to register async subdev: %d\n", ret);
+		goto err_clean_entity;
+	}
+
+	dev_info(dev,
+		 "Chronos CSI bridge registered (2-lane, VC0..3, %ux%u Y10)\n",
+		 CHRONOS_WIDTH, CHRONOS_HEIGHT);
+
+	return 0;
+
+err_clean_entity:
+	media_entity_cleanup(&bridge->sd.entity);
+err_put_client:
+	put_device(&bridge->fpga_client->dev);
+	return ret;
 }
 
-static int chronos_enum_fmt(struct file *file, void *priv,
-                            struct v4l2_fmtdesc *f)
+static int chronos_bridge_remove(struct platform_device *pdev)
 {
-    if (f->index > 0)
-        return -EINVAL;
-    
-    f->pixelformat = V4L2_PIX_FMT_Y10;
-    strscpy(f->description, "10-bit Greyscale", sizeof(f->description));
-    
-    return 0;
+	struct chronos_bridge *bridge = platform_get_drvdata(pdev);
+
+	v4l2_async_unregister_subdev(&bridge->sd);
+	media_entity_cleanup(&bridge->sd.entity);
+
+	/* Make sure the trigger is off when the bridge goes away. */
+	chronos_fpga_trigger_enable(bridge->fpga_client, false);
+	put_device(&bridge->fpga_client->dev);
+
+	return 0;
 }
 
-static int chronos_g_fmt(struct file *file, void *priv,
-                         struct v4l2_format *f)
-{
-    struct chronos_channel *ch = video_drvdata(file);
-    
-    f->fmt.pix = ch->pix_fmt;
-    
-    return 0;
-}
-
-static int chronos_s_fmt(struct file *file, void *priv,
-                         struct v4l2_format *f)
-{
-    struct chronos_channel *ch = video_drvdata(file);
-    
-    /* Fixed format - just return current */
-    f->fmt.pix = ch->pix_fmt;
-    
-    return 0;
-}
-
-static int chronos_try_fmt(struct file *file, void *priv,
-                           struct v4l2_format *f)
-{
-    f->fmt.pix.width = CHRONOS_WIDTH;
-    f->fmt.pix.height = CHRONOS_HEIGHT;
-    f->fmt.pix.pixelformat = V4L2_PIX_FMT_Y10;
-    f->fmt.pix.field = V4L2_FIELD_NONE;
-    f->fmt.pix.bytesperline = CHRONOS_WIDTH * CHRONOS_BPP;
-    f->fmt.pix.sizeimage = CHRONOS_FRAME_SIZE;
-    f->fmt.pix.colorspace = V4L2_COLORSPACE_RAW;
-    
-    return 0;
-}
-
-static int chronos_enum_input(struct file *file, void *priv,
-                              struct v4l2_input *inp)
-{
-    struct chronos_channel *ch = video_drvdata(file);
-    
-    if (inp->index > 0)
-        return -EINVAL;
-    
-    snprintf(inp->name, sizeof(inp->name), "Camera %d", ch->vc_id);
-    inp->type = V4L2_INPUT_TYPE_CAMERA;
-    inp->std = V4L2_STD_UNKNOWN;
-    
-    return 0;
-}
-
-static int chronos_g_input(struct file *file, void *priv, unsigned int *i)
-{
-    *i = 0;
-    return 0;
-}
-
-static int chronos_s_input(struct file *file, void *priv, unsigned int i)
-{
-    return (i == 0) ? 0 : -EINVAL;
-}
-
-static int chronos_g_parm(struct file *file, void *priv,
-                          struct v4l2_streamparm *sp)
-{
-    if (sp->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-        return -EINVAL;
-    
-    sp->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
-    sp->parm.capture.timeperframe.numerator = 1;
-    sp->parm.capture.timeperframe.denominator = 120;  /* 120fps max */
-    sp->parm.capture.readbuffers = CHRONOS_BUF_COUNT;
-    
-    return 0;
-}
-
-static int chronos_s_parm(struct file *file, void *priv,
-                          struct v4l2_streamparm *sp)
-{
-    struct chronos_channel *ch = video_drvdata(file);
-    struct chronos_dev *cdev = ch->parent;
-    u32 fps;
-    
-    if (sp->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-        return -EINVAL;
-    
-    /* Calculate requested FPS */
-    if (sp->parm.capture.timeperframe.numerator == 0)
-        fps = 30;
-    else
-        fps = sp->parm.capture.timeperframe.denominator /
-              sp->parm.capture.timeperframe.numerator;
-    
-    /* Clamp to valid range */
-    if (fps < 1) fps = 1;
-    if (fps > 120) fps = 120;
-    
-    /* Set in FPGA */
-    chronos_fpga_set_frame_rate(cdev, fps);
-    
-    sp->parm.capture.timeperframe.numerator = 1;
-    sp->parm.capture.timeperframe.denominator = fps;
-    
-    return 0;
-}
-
-static const struct v4l2_ioctl_ops chronos_ioctl_ops = {
-    .vidioc_querycap         = chronos_querycap,
-    .vidioc_enum_fmt_vid_cap = chronos_enum_fmt,
-    .vidioc_g_fmt_vid_cap    = chronos_g_fmt,
-    .vidioc_s_fmt_vid_cap    = chronos_s_fmt,
-    .vidioc_try_fmt_vid_cap  = chronos_try_fmt,
-    .vidioc_enum_input       = chronos_enum_input,
-    .vidioc_g_input          = chronos_g_input,
-    .vidioc_s_input          = chronos_s_input,
-    .vidioc_g_parm           = chronos_g_parm,
-    .vidioc_s_parm           = chronos_s_parm,
-    .vidioc_reqbufs          = vb2_ioctl_reqbufs,
-    .vidioc_querybuf         = vb2_ioctl_querybuf,
-    .vidioc_qbuf             = vb2_ioctl_qbuf,
-    .vidioc_dqbuf            = vb2_ioctl_dqbuf,
-    .vidioc_expbuf           = vb2_ioctl_expbuf,
-    .vidioc_streamon         = vb2_ioctl_streamon,
-    .vidioc_streamoff        = vb2_ioctl_streamoff,
-    .vidioc_subscribe_event  = v4l2_ctrl_subscribe_event,
-    .vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+static const struct of_device_id chronos_bridge_of_match[] = {
+	{ .compatible = "chronos,csi-bridge" },
+	{ }
 };
+MODULE_DEVICE_TABLE(of, chronos_bridge_of_match);
 
-/* ============================================================================
- * File Operations
- * ============================================================================ */
-
-static int chronos_open(struct file *file)
-{
-    struct chronos_channel *ch = video_drvdata(file);
-    int ret;
-    
-    ret = v4l2_fh_open(file);
-    if (ret)
-        return ret;
-    
-    dev_dbg(ch->parent->dev, "VC%d: Device opened\n", ch->vc_id);
-    
-    return 0;
-}
-
-static int chronos_release(struct file *file)
-{
-    struct chronos_channel *ch = video_drvdata(file);
-    
-    dev_dbg(ch->parent->dev, "VC%d: Device closed\n", ch->vc_id);
-    
-    return vb2_fop_release(file);
-}
-
-static const struct v4l2_file_operations chronos_fops = {
-    .owner          = THIS_MODULE,
-    .open           = chronos_open,
-    .release        = chronos_release,
-    .unlocked_ioctl = video_ioctl2,
-    .read           = vb2_fop_read,
-    .mmap           = vb2_fop_mmap,
-    .poll           = vb2_fop_poll,
+static struct platform_driver chronos_bridge_driver = {
+	.probe = chronos_bridge_probe,
+	.remove = chronos_bridge_remove,
+	.driver = {
+		.name = CHRONOS_BRIDGE_NAME,
+		.of_match_table = chronos_bridge_of_match,
+	},
 };
-
-/* ============================================================================
- * Channel Initialization
- * ============================================================================ */
-
-static int chronos_init_channel(struct chronos_dev *cdev, int ch_num)
-{
-    struct chronos_channel *ch = &cdev->channels[ch_num];
-    struct vb2_queue *vq = &ch->vb2_queue;
-    int ret;
-    
-    ch->vc_id = ch_num;
-    ch->parent = cdev;
-    ch->streaming = false;
-    
-    mutex_init(&ch->lock);
-    spin_lock_init(&ch->qlock);
-    INIT_LIST_HEAD(&ch->buf_list);
-    
-    /* Set default format */
-    ch->pix_fmt.width = CHRONOS_WIDTH;
-    ch->pix_fmt.height = CHRONOS_HEIGHT;
-    ch->pix_fmt.pixelformat = V4L2_PIX_FMT_Y10;
-    ch->pix_fmt.field = V4L2_FIELD_NONE;
-    ch->pix_fmt.bytesperline = CHRONOS_WIDTH * CHRONOS_BPP;
-    ch->pix_fmt.sizeimage = CHRONOS_FRAME_SIZE;
-    ch->pix_fmt.colorspace = V4L2_COLORSPACE_RAW;
-    
-    /* Initialize vb2 queue */
-    vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    vq->io_modes = VB2_MMAP | VB2_DMABUF | VB2_READ;
-    vq->dev = cdev->dev;
-    vq->drv_priv = ch;
-    vq->buf_struct_size = sizeof(struct chronos_buffer);
-    vq->ops = &chronos_vb2_ops;
-    vq->mem_ops = &vb2_dma_contig_memops;
-    vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-    vq->min_buffers_needed = 2;
-    vq->lock = &ch->lock;
-    vq->gfp_flags = GFP_DMA32;
-    
-    ret = vb2_queue_init(vq);
-    if (ret) {
-        dev_err(cdev->dev, "Failed to init vb2 queue for VC%d\n", ch_num);
-        return ret;
-    }
-    
-    /* Initialize video device */
-    snprintf(ch->vdev.name, sizeof(ch->vdev.name), "chronos-cam%d", ch_num);
-    ch->vdev.fops = &chronos_fops;
-    ch->vdev.ioctl_ops = &chronos_ioctl_ops;
-    ch->vdev.release = video_device_release_empty;
-    ch->vdev.v4l2_dev = &cdev->v4l2_dev;
-    ch->vdev.queue = vq;
-    ch->vdev.lock = &ch->lock;
-    ch->vdev.device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING |
-                           V4L2_CAP_READWRITE;
-    
-    video_set_drvdata(&ch->vdev, ch);
-    
-    ret = video_register_device(&ch->vdev, VFL_TYPE_VIDEO, -1);
-    if (ret) {
-        dev_err(cdev->dev, "Failed to register video device for VC%d\n", ch_num);
-        return ret;
-    }
-    
-    dev_info(cdev->dev, "Registered /dev/video%d for Camera %d (VC%d)\n",
-             ch->vdev.num, ch_num, ch_num);
-    
-    return 0;
-}
-
-static void chronos_cleanup_channel(struct chronos_channel *ch)
-{
-    if (video_is_registered(&ch->vdev))
-        video_unregister_device(&ch->vdev);
-    
-    mutex_destroy(&ch->lock);
-}
-
-/* ============================================================================
- * Platform Driver
- * ============================================================================ */
-
-static int chronos_probe(struct platform_device *pdev)
-{
-    struct chronos_dev *cdev;
-    struct device *dev = &pdev->dev;
-    int ret, i;
-    
-    dev_info(dev, "Chronos Multi-Camera CSI driver probing\n");
-    
-    cdev = devm_kzalloc(dev, sizeof(*cdev), GFP_KERNEL);
-    if (!cdev)
-        return -ENOMEM;
-    
-    cdev->dev = dev;
-    cdev->pdev = pdev;
-    platform_set_drvdata(pdev, cdev);
-    
-    /* Get clocks */
-    cdev->clk_csi = devm_clk_get(dev, "csi");
-    if (IS_ERR(cdev->clk_csi)) {
-        dev_warn(dev, "CSI clock not found, using default\n");
-        cdev->clk_csi = NULL;
-    }
-    
-    /* Register V4L2 device */
-    ret = v4l2_device_register(dev, &cdev->v4l2_dev);
-    if (ret) {
-        dev_err(dev, "Failed to register V4L2 device\n");
-        return ret;
-    }
-    
-    /* Initialize channels */
-    for (i = 0; i < CHRONOS_MAX_CAMERAS; i++) {
-        ret = chronos_init_channel(cdev, i);
-        if (ret) {
-            dev_err(dev, "Failed to init channel %d\n", i);
-            goto err_cleanup;
-        }
-    }
-    
-    dev_info(dev, "Chronos CSI driver initialized with %d cameras\n",
-             CHRONOS_MAX_CAMERAS);
-    
-    return 0;
-
-err_cleanup:
-    for (i--; i >= 0; i--)
-        chronos_cleanup_channel(&cdev->channels[i]);
-    v4l2_device_unregister(&cdev->v4l2_dev);
-    
-    return ret;
-}
-
-static int chronos_remove(struct platform_device *pdev)
-{
-    struct chronos_dev *cdev = platform_get_drvdata(pdev);
-    int i;
-    
-    for (i = 0; i < CHRONOS_MAX_CAMERAS; i++)
-        chronos_cleanup_channel(&cdev->channels[i]);
-    
-    v4l2_device_unregister(&cdev->v4l2_dev);
-    
-    dev_info(&pdev->dev, "Chronos CSI driver removed\n");
-    
-    return 0;
-}
-
-static const struct of_device_id chronos_of_match[] = {
-    { .compatible = "chronos,multi-camera-csi" },
-    { }
-};
-MODULE_DEVICE_TABLE(of, chronos_of_match);
-
-static struct platform_driver chronos_driver = {
-    .probe  = chronos_probe,
-    .remove = chronos_remove,
-    .driver = {
-        .name = CHRONOS_DRIVER_NAME,
-        .of_match_table = chronos_of_match,
-    },
-};
-
-module_platform_driver(chronos_driver);
+module_platform_driver(chronos_bridge_driver);
 
 MODULE_AUTHOR("Chronos Project");
-MODULE_DESCRIPTION("Chronos Multi-Camera MIPI CSI Driver");
+MODULE_DESCRIPTION("Chronos aggregated CSI-2 source bridge subdevice");
 MODULE_LICENSE("GPL v2");
+/* Imports symbols from chronos_fpga.ko; make modprobe load it first. */
+MODULE_SOFTDEP("pre: chronos_fpga");

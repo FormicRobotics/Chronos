@@ -21,7 +21,6 @@
 /* OpenCV for display (optional) */
 #ifdef USE_OPENCV
 #include <opencv2/opencv.hpp>
-#include <opencv2/cudaarithm.hpp>
 #endif
 
 /* ============================================================================
@@ -45,7 +44,9 @@ __global__ void convert_10bit_to_8bit_kernel(
     
     uint16_t val = input[idx_in];
     
-    /* Scale from 10-bit to 8-bit */
+    /* Scale from 10-bit to 8-bit.  Assumption: Y10 on the Tegra VI is
+     * LSB-aligned in its 16-bit container, so dropping the two least
+     * significant bits (val >> 2) yields the correct 8-bit value. */
     output[idx_out] = (uint8_t)((val >> 2) & 0xFF);
 }
 
@@ -96,6 +97,9 @@ __global__ void create_quad_view_kernel(
  * Application Class
  * ============================================================================ */
 
+/* Set from the signal handler; polled by the main loop. */
+static volatile sig_atomic_t g_stop = 0;
+
 class ChronosDemo {
 public:
     struct Options {
@@ -112,11 +116,22 @@ public:
         size_t frame_size = CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT;
         
         for (int i = 0; i < CHRONOS_NUM_CAMERAS; i++) {
-            cudaMalloc(&gpu_frames_8bit_[i], frame_size);
+            if (cudaMalloc(&gpu_frames_8bit_[i], frame_size) != cudaSuccess) {
+                gpu_frames_8bit_[i] = nullptr;
+                gpu_ok_ = false;
+            }
         }
         
         /* Quad view buffer (1280x800 display) */
-        cudaMalloc(&gpu_quad_view_, CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT);
+        if (cudaMalloc(&gpu_quad_view_, CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT)
+                != cudaSuccess) {
+            gpu_quad_view_ = nullptr;
+            gpu_ok_ = false;
+        }
+        
+        if (!gpu_ok_) {
+            std::cerr << "cudaMalloc failed - GPU processing disabled\n";
+        }
         
         /* Host buffer for display */
         host_display_ = new uint8_t[CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT];
@@ -175,7 +190,7 @@ public:
         std::cout << "Gain: " << opts_.gain_db << " dB\n";
         std::cout << "\nPress Ctrl+C to stop...\n\n";
         
-        while (running_) {
+        while (running_ && !g_stop) {
             chronos_sync_frame_set_t frame_set;
             
             err = chronos_get_frame_set(&frame_set, 1000);
@@ -189,8 +204,18 @@ public:
                 break;
             }
             
+            /* Skip incomplete frame sets (a camera missed the trigger) */
+            if (!frame_set.complete) {
+                incomplete_sets_++;
+                chronos_release_frame_set(&frame_set);
+                continue;
+            }
+            
             /* Process frames on GPU */
             process_frames(&frame_set);
+            
+            /* Show the mosaic (when built with OpenCV and not headless) */
+            display_quad_view();
             
             /* Display IMU data */
             if (opts_.show_imu) {
@@ -228,6 +253,10 @@ public:
             }
         }
         
+        if (g_stop) {
+            std::cout << "\nStopping capture..." << std::endl;
+        }
+        
         /* Print statistics */
         print_stats();
         
@@ -244,6 +273,8 @@ public:
     
 private:
     void process_frames(chronos_sync_frame_set_t* frame_set) {
+        if (!gpu_ok_) return;
+        
         dim3 block(16, 16);
         dim3 grid((CHRONOS_FRAME_WIDTH + 15) / 16, (CHRONOS_FRAME_HEIGHT + 15) / 16);
         
@@ -280,6 +311,17 @@ private:
                       CHRONOS_FRAME_WIDTH * CHRONOS_FRAME_HEIGHT,
                       cudaMemcpyDeviceToHost);
         }
+    }
+    
+    void display_quad_view() {
+#ifdef USE_OPENCV
+        if (opts_.headless || !gpu_ok_) return;
+        
+        cv::Mat view(CHRONOS_FRAME_HEIGHT, CHRONOS_FRAME_WIDTH, CV_8UC1,
+                     host_display_);
+        cv::imshow("Chronos Quad View", view);
+        cv::waitKey(1);
+#endif
     }
     
     void display_imu(const chronos_imu_data_t* imu) {
@@ -332,12 +374,15 @@ private:
         }
         std::cout << "\nSync errors: " << stats.sync_errors;
         std::cout << "\nBuffer overruns: " << stats.buffer_overruns;
+        std::cout << "\nIncomplete sets skipped: " << incomplete_sets_;
         std::cout << "\nAvg latency: " << stats.avg_latency_us << " us";
         std::cout << "\nMax sync skew: " << stats.max_sync_skew_us << " us\n";
     }
     
     Options opts_;
     bool running_;
+    bool gpu_ok_ = true;
+    uint64_t incomplete_sets_ = 0;
     
     uint8_t* gpu_frames_8bit_[CHRONOS_NUM_CAMERAS] = {nullptr};
     uint8_t* gpu_quad_view_ = nullptr;
@@ -348,14 +393,10 @@ private:
  * Signal Handler
  * ============================================================================ */
 
-static ChronosDemo* g_demo = nullptr;
-
+/* Async-signal-safe: only set the flag; the main loop does the printing. */
 void signal_handler(int sig) {
     (void)sig;
-    std::cout << "\nStopping capture..." << std::endl;
-    if (g_demo) {
-        g_demo->stop();
-    }
+    g_stop = 1;
 }
 
 /* ============================================================================
@@ -430,7 +471,6 @@ int main(int argc, char** argv) {
     
     /* Run demo */
     ChronosDemo demo(opts);
-    g_demo = &demo;
     
     return demo.run();
 }

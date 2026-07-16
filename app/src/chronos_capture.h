@@ -7,13 +7,13 @@
  *
  * @details
  * This library provides a high-level C API for synchronized multi-camera
- * capture with zero-copy GPU memory access on the NVIDIA Jetson platform.
+ * capture on the NVIDIA Jetson platform.
  *
  * Key Features:
  * - Synchronized capture from 4 OV9281 global shutter cameras
- * - Zero-copy path from camera to GPU memory
+ * - V4L2 MMAP capture with direct CPU access to frame data
+ * - Optional CUDA device-copy path for GPU processing
  * - Integrated IMU data with camera timestamps
- * - CUDA-EGL interop for direct GPU processing
  * - Triple-buffering to prevent frame drops
  *
  * Basic Usage:
@@ -34,7 +34,8 @@
  *   while (running) {
  *       chronos_sync_frame_set_t frames;
  *       if (chronos_get_frame_set(&frames, 1000) == CHRONOS_OK) {
- *           // Process frames with CUDA
+ *           // CPU access: frames.frames[0].data (mmap'd V4L2 buffer)
+ *           // Optional GPU access (copies the frame to the device):
  *           void *gpu_ptr;
  *           chronos_get_cuda_ptr(&frames.frames[0], &gpu_ptr);
  *           // ... run CUDA kernels ...
@@ -51,9 +52,12 @@
  * - Callback mode runs in a dedicated capture thread
  *
  * Memory Model:
- * - Frames are allocated from a fixed pool (triple-buffered by default)
- * - chronos_release_frame_set() MUST be called to return frames to pool
- * - CUDA pointers remain valid until frame is released
+ * - Frames live in driver-owned V4L2 MMAP buffers (triple-buffered by default)
+ * - Buffers are NOT re-queued until chronos_release_frame_set() is called,
+ *   so frame data stays valid while the consumer holds the set
+ * - If the consumer never releases, capture stalls gracefully (drops are
+ *   counted in the statistics) instead of overwriting held frames
+ * - CUDA pointers (device copies) remain valid until frame is released
  */
 
 #ifndef CHRONOS_CAPTURE_H
@@ -177,16 +181,15 @@ typedef struct {
 /**
  * @brief Single camera frame buffer
  *
- * This structure provides access to frame data through multiple
- * interfaces (CPU, GPU, DMA). Only use the appropriate pointer
- * for your access pattern.
+ * This structure provides access to frame data through the CPU pointer
+ * (always valid) and an optional CUDA device pointer.
  */
 typedef struct {
     /**
-     * @brief CPU-accessible pointer
+     * @brief CPU-accessible pointer (mmap'd V4L2 buffer)
      *
-     * Only valid after calling chronos_map_cpu(). NULL if not mapped.
-     * Avoid CPU access when possible - use CUDA for processing.
+     * Always valid for a delivered frame - no explicit mapping call is
+     * needed. The pointer stays valid until chronos_release_frame_set().
      */
     void *data;
 
@@ -194,15 +197,10 @@ typedef struct {
      * @brief CUDA device pointer
      *
      * Valid after calling chronos_get_cuda_ptr() or chronos_cuda_map().
-     * This is a zero-copy pointer - no memcpy needed!
+     * Points to a device-side copy of the frame (tightly packed,
+     * pitch = width * 2 bytes). NULL until mapped.
      */
     void *cuda_ptr;
-
-    /** DMA-BUF file descriptor for external sharing */
-    int dmabuf_fd;
-
-    /** NvBuffer file descriptor (Jetson-specific) */
-    int nvbuf_fd;
 
     /** Frame width in pixels */
     uint32_t width;
@@ -342,8 +340,22 @@ typedef struct {
      *
      * Higher values reduce dropped frames but increase memory.
      * Default: 3 (triple buffering)
+     *
+     * @note Buffers are allocated once by chronos_init(). Passing a
+     * different value to chronos_configure() after init returns
+     * CHRONOS_ERROR_PARAM (0 means "keep the current value").
      */
     uint32_t buffer_count;
+
+    /**
+     * @brief FSIN trigger pulse width in FPGA clock cycles (192 MHz)
+     *
+     * 0 selects the default of 2000 cycles (~10.4 us), which satisfies
+     * the OV9281 minimum pulse spec. The pulse width is independent of
+     * exposure - integration time is programmed in the sensor by the FPGA.
+     * Maximum: 65535 cycles.
+     */
+    uint32_t fsin_pulse_width_cycles;
 } chronos_config_t;
 
 /**
@@ -369,15 +381,16 @@ typedef void (*chronos_frame_callback_t)(chronos_sync_frame_set_t *frame_set,
  * @brief Initialize the Chronos capture system
  *
  * Initializes all hardware components:
- * - Opens V4L2 video devices for all 4 cameras
- * - Initializes CUDA context and EGL interop
+ * - Opens V4L2 video devices for all 4 cameras and maps MMAP buffers
+ * - Opens the FPGA I2C control link and verifies its identity registers
+ * - Initializes CUDA (optional - capture works without it)
  * - Opens IMU device
- * - Allocates NvBuffer pools for zero-copy capture
  *
  * @return CHRONOS_OK on success
  * @return CHRONOS_ERROR_INIT if devices not found or initialization fails
- * @return CHRONOS_ERROR_CUDA if CUDA initialization fails
  *
+ * @note CUDA or FPGA I2C failures are not fatal - the affected feature is
+ * disabled with a warning and initialization continues
  * @note Must be called before any other Chronos functions
  * @note Call chronos_shutdown() when done, even if init fails partially
  */
@@ -499,16 +512,18 @@ chronos_error_t chronos_get_frame_set(chronos_sync_frame_set_t *frame_set,
 /**
  * @brief Release a frame set back to the buffer pool
  *
- * Returns the frame buffers for reuse. Must be called after processing
- * each frame set obtained from chronos_get_frame_set() or callback.
+ * Re-queues the underlying V4L2 buffers to the drivers. Must be called
+ * after processing each frame set obtained from chronos_get_frame_set()
+ * or callback.
  *
  * @param frame_set Frame set to release
  *
  * @return CHRONOS_OK on success
  * @return CHRONOS_ERROR_PARAM if frame_set is NULL
  *
- * @warning Failing to call this function will cause buffer starvation!
- * @warning CUDA pointers become invalid after this call
+ * @warning Failing to call this function stalls capture (drops are
+ * counted in the statistics) until the set is released!
+ * @warning Frame data and CUDA pointers become invalid after this call
  */
 chronos_error_t chronos_release_frame_set(chronos_sync_frame_set_t *frame_set);
 
@@ -531,46 +546,48 @@ chronos_error_t chronos_set_frame_callback(chronos_frame_callback_t callback,
 
 /*
  * =============================================================================
- * CUDA Integration (Zero-Copy GPU Access)
+ * CUDA Integration (Optional Device-Copy Path)
  * =============================================================================
  */
 
 /**
- * @brief Get CUDA pointer for a frame (zero-copy)
+ * @brief Get CUDA device pointer for a frame
  *
- * Maps the frame buffer to CUDA and returns a device pointer that
- * can be used directly in CUDA kernels. This is a zero-copy operation -
- * the data remains in place, no memcpy is performed.
+ * Copies the frame into a pre-allocated CUDA device buffer (tightly
+ * packed, pitch = width * 2 bytes) and returns the device pointer.
+ * The copy is performed once per frame - repeated calls return the
+ * same pointer without copying again.
  *
  * @param frame Frame to get CUDA pointer for
  * @param cuda_ptr Pointer to store the CUDA device pointer
  *
  * @return CHRONOS_OK on success
  * @return CHRONOS_ERROR_PARAM if frame or cuda_ptr is NULL
- * @return CHRONOS_ERROR_CUDA if CUDA mapping fails
+ * @return CHRONOS_ERROR_CUDA if CUDA is unavailable or the copy fails
  *
  * @note Pointer remains valid until chronos_release_frame_set()
- * @note Frame is automatically mapped if not already mapped
+ * @note Only available when the library is built with CHRONOS_WITH_CUDA
  */
 chronos_error_t chronos_get_cuda_ptr(chronos_frame_t *frame, void **cuda_ptr);
 
 /**
- * @brief Explicitly map frame to CUDA
+ * @brief Explicitly copy frame to CUDA device memory
  *
- * Maps the frame for CUDA access. Usually not needed - chronos_get_cuda_ptr()
- * performs mapping automatically.
+ * Same as chronos_get_cuda_ptr() without returning the pointer
+ * (it is stored in frame->cuda_ptr).
  *
- * @param frame Frame to map
+ * @param frame Frame to copy
  *
  * @return CHRONOS_OK on success
  */
 chronos_error_t chronos_cuda_map(chronos_frame_t *frame);
 
 /**
- * @brief Unmap frame from CUDA
+ * @brief Invalidate the frame's cached CUDA pointer
  *
- * Releases CUDA mapping for the frame. Usually not needed - mapping
- * is released automatically by chronos_release_frame_set().
+ * Clears frame->cuda_ptr. The device buffer itself stays allocated and
+ * is refreshed on the next chronos_get_cuda_ptr(). Usually not needed -
+ * the copy is invalidated automatically when the buffer is reused.
  *
  * @param frame Frame to unmap
  *
@@ -630,6 +647,22 @@ typedef struct {
 
     /** Current measured frame rate */
     uint32_t current_fps;
+
+    /**
+     * @brief FPGA STATUS register (0x20) snapshot
+     *
+     * Bit0 = PLL locked, bits7:4 = per-camera sync status.
+     * 0 when the FPGA I2C link is unavailable.
+     */
+    uint8_t fpga_status;
+
+    /**
+     * @brief FPGA ERROR register (0x21) snapshot
+     *
+     * Bits3:0 = CSI-2 RX errors, bits7:4 = buffer overflow flags.
+     * 0 when the FPGA I2C link is unavailable.
+     */
+    uint8_t fpga_error;
 } chronos_stats_t;
 
 /**

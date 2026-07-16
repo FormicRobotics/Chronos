@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Makefile for Chronos CSI driver
+# Makefile for the Chronos CSI bridge subdevice
+#
+# The bridge uses symbols exported by chronos_fpga.ko; build that module
+# first so its Module.symvers is available (handled automatically by the
+# top-level drivers/Makefile, or pass KBUILD_EXTRA_SYMBOLS manually).
 
 obj-$(CONFIG_VIDEO_CHRONOS_CSI) += chronos_csi.o
 
@@ -14,8 +18,10 @@ ifdef TEGRA_KERNEL_OUT
 KDIR := $(TEGRA_KERNEL_OUT)
 endif
 
+KBUILD_EXTRA_SYMBOLS ?= $(PWD)/../chronos_fpga/Module.symvers
+
 default:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) KBUILD_EXTRA_SYMBOLS=$(KBUILD_EXTRA_SYMBOLS) modules
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

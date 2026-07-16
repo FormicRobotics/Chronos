@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_CHRONOS_CSI
+	tristate "Chronos aggregated CSI-2 bridge subdevice"
+	depends on VIDEO_DEV && OF
+	depends on CHRONOS_FPGA
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	help
+	  V4L2 subdevice bridge for the Chronos multi-camera board.  The
+	  board's CrossLink-NX FPGA aggregates four OV9281 cameras into one
+	  2-lane MIPI CSI-2 link with virtual channels VC0..VC3; this subdev
+	  represents that single aggregated source toward the Tegra
+	  NVCSI/VI capture stack (which creates the video nodes).
+
+	  Requires the chronos_fpga control driver for the FSIN trigger
+	  start/stop path.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called chronos_csi.

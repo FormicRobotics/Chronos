@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 config VIDEO_OV9281
-	tristate "OmniVision OV9281 sensor support"
+	tristate "OmniVision OV9281 sensor support (NOT for the Chronos board)"
 	depends on I2C && VIDEO_DEV
 	select MEDIA_CONTROLLER
 	select VIDEO_V4L2_SUBDEV_API
 	select V4L2_FWNODE
 	help
 	  This is a V4L2 sensor driver for the OmniVision OV9281
-	  global shutter camera sensor.
+	  global shutter camera sensor, for setups where the sensor is
+	  directly attached to the host's I2C bus and MIPI receiver.
 
-	  The OV9281 is a 1MP (1280x800) monochrome global shutter
-	  sensor with MIPI CSI-2 interface, commonly used for
-	  machine vision and depth sensing applications.
-
-	  Supports external trigger mode via FSIN pin for
-	  multi-camera synchronization.
+	  DO NOT enable or load this driver on the Chronos board
+	  (HW_CHRONOS_R1): there the OV9281 sensors live on FPGA-private
+	  SCCB buses that the Jetson cannot reach, and the FPGA owns the
+	  complete sensor configuration (27 MHz XCLK, FSIN trigger mode,
+	  30 fps).  This driver's 24 MHz / 120 fps free-run defaults
+	  conflict with that.  Use CHRONOS_FPGA and VIDEO_CHRONOS_CSI
+	  instead.  It is kept only as a reference for a future hardware
+	  revision.
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ov9281.

@@ -2,6 +2,26 @@
 /*
  * OmniVision OV9281 CMOS Image Sensor Driver
  *
+ * =============================================================================
+ * WARNING: NOT USED ON THE CHRONOS BOARD (HW_CHRONOS_R1) - DO NOT LOAD
+ * =============================================================================
+ * On Chronos the four OV9281 sensors sit on FPGA-private SCCB buses and are
+ * NOT reachable from the Jetson over I2C.  The CrossLink-NX FPGA owns the
+ * complete sensor configuration (register tables, PLL for the 27 MHz XCLK it
+ * forwards, FSIN external-trigger mode, 30 fps VTS) and streams the
+ * aggregated result to the Jetson as a single 2-lane CSI-2 link with virtual
+ * channels VC0..VC3.  This driver's assumptions (24 MHz XCLK, 120 fps
+ * free-run, full register-table writes on STREAMON) directly conflict with
+ * the FPGA-owned init and would corrupt the sensor state if it could reach
+ * the bus at all.
+ *
+ * The file is retained ONLY as a reference for a possible future hardware
+ * revision where a sensor hangs directly off the Jetson.  There is no
+ * ov9281 node in chronos-orin-nx.dts and the module must not be loaded on
+ * this board.  See drivers/chronos_fpga/ and drivers/chronos_csi/ for the
+ * drivers that are actually used.
+ * =============================================================================
+ *
  * Copyright (C) 2025 Chronos Project
  * Author: Chronos Development Team
  *

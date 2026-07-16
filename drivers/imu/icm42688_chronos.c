@@ -2,6 +2,21 @@
 /*
  * TDK InvenSense ICM-42688-P IMU driver for the Chronos board.
  *
+ * =============================================================================
+ * WARNING: NOT USABLE ON CHRONOS R1 (HW_CHRONOS_R1) - DO NOT LOAD
+ * =============================================================================
+ * The ICM-42688-P (IC1) is wired ONLY to the FPGA: its SPI bus and INT1 go
+ * to CrossLink-NX pins, not to the Jetson.  The Jetson has no SPI or GPIO
+ * path to this device, so this Jetson-side SPI driver cannot possibly bind
+ * to real hardware on this board, and chronos-orin-nx.dts contains no IMU
+ * node.  (The FPGA-side SPI master is future work; a later FPGA release may
+ * proxy IMU data through its I2C register file at 0x3C.)
+ *
+ * The driver is retained ONLY for a future hardware revision that routes
+ * the IMU SPI to the Jetson, or as a reference for the eventual FPGA proxy.
+ * See drivers/imu/README.md.
+ * =============================================================================
+ *
  * Copyright (C) 2025 Chronos Project
  *
  * Hardware notes (from HW_CHRONOS_R1 netlist, IC1):
@@ -351,8 +366,9 @@ done:
 	return IRQ_HANDLED;
 }
 
-/* INT1 is wired to the FPGA, but on Jetson it comes back through the GPIO
- * declared in the DT.  Use it as a hard data-ready hand-off. */
+/* Data-ready hand-off via the IRQ declared in the DT.  On Chronos R1 no
+ * such path exists (INT1 goes to the FPGA only); this only applies to a
+ * future revision where the IMU interrupt reaches the host. */
 static irqreturn_t icm42688_irq(int irq, void *priv)
 {
 	struct iio_dev  *idev = priv;

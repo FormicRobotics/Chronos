@@ -75,11 +75,14 @@ private:
  * Sync Test Class
  * ============================================================================ */
 
+/* Set from the signal handler; polled by the collection loop. */
+static volatile sig_atomic_t g_stop = 0;
+
 class SyncTest {
 public:
     struct Options {
         int frame_count = 1000;
-        int frame_rate = 120;
+        int frame_rate = 30;    /* design point; use -r 120 for stress mode */
         bool verbose = false;
     };
     
@@ -131,7 +134,7 @@ public:
         uint64_t prev_timestamp = 0;
         int collected = 0;
         
-        while (running_ && collected < opts_.frame_count) {
+        while (running_ && !g_stop && collected < opts_.frame_count) {
             chronos_sync_frame_set_t frame_set;
             
             err = chronos_get_frame_set(&frame_set, 1000);
@@ -195,6 +198,10 @@ public:
         }
         
         std::cout << "\n\n";
+        
+        if (g_stop) {
+            std::cout << "Interrupted - reporting on collected data.\n\n";
+        }
         
         /* Print results */
         print_results(frame_skew, frame_interval, imu_camera_offset);
@@ -267,11 +274,10 @@ private:
  * Main
  * ============================================================================ */
 
-static SyncTest* g_test = nullptr;
-
+/* Async-signal-safe: only set the flag; the main loop does the reporting. */
 void signal_handler(int sig) {
     (void)sig;
-    if (g_test) g_test->stop();
+    g_stop = 1;
 }
 
 int main(int argc, char** argv) {
@@ -290,7 +296,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage: " << argv[0] << " [options]\n\n"
                       << "Options:\n"
                       << "  -n <count>    Number of frames to test (default: 1000)\n"
-                      << "  -r <fps>      Frame rate (default: 120)\n"
+                      << "  -r <fps>      Frame rate (default: 30; 120 = stress mode)\n"
                       << "  -v            Verbose output\n"
                       << "  -h            Show this help\n";
             return 0;
@@ -301,7 +307,6 @@ int main(int argc, char** argv) {
     signal(SIGTERM, signal_handler);
     
     SyncTest test(opts);
-    g_test = &test;
     
     return test.run();
 }

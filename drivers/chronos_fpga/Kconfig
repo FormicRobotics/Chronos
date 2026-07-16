@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config CHRONOS_FPGA
+	tristate "Chronos FPGA control interface"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  Driver for the I2C control interface of the Lattice CrossLink-NX
+	  FPGA on the Chronos multi-camera board (7-bit address 0x3C,
+	  compatible "chronos,fpga-ctrl").
+
+	  The FPGA aggregates four OV9281 cameras into one 2-lane MIPI CSI-2
+	  link with virtual channels VC0..VC3 and generates the FSIN frame
+	  trigger.  This driver exposes trigger/frame-rate/status control via
+	  sysfs and an in-kernel API used by the chronos_csi bridge.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called chronos_fpga.
