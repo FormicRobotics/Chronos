@@ -95,7 +95,8 @@ rejected. Do NOT hand-patch the IDCODE - it invalidates the bitstream CRC ("Inva
 - Constraints `fpga/blinky/chronos_blinky.pdc` (4 LEDs + reset).
 - Project `fpga/blinky/es20/chronos_blinky_es` (Radiant 2.0 SP1, device LIFCL-40-8BG400C).
 - Result: LEDs blink from flash after power-cycle. Toolchain + board + flash path proven.
-- LEDs (active-high via NPN drivers Q1..Q4): LED0=E17, LED1=F13, LED2=G13, LED3=F14.
+- LEDs (ACTIVE-LOW, FPGA sinks the cathode - see section 1): LED0=E17, LED1=F13,
+  LED2=G13, LED3=F14. (Blinky just looked inverted; harmless there.)
 
 ---
 
@@ -112,17 +113,49 @@ D-PHY IP wrappers, per-camera recovered byte clocks, correct header/ECC/CRC via 
 FWFT async frame_buffer with pkt_avail gating, token-based tx_arbiter, FPGA-driven OV9281
 SCCB init, per-port DEV_ADDR (SID), 27 MHz XCLK forwarding, active-low LED handling.
 
+### Full-review fixes (2026-07, second from-scratch pass)
+- clk_sys is 192 MHz, NOT 200: 200 MHz is unreachable from the 12 MHz ref with integer
+  PLL dividers (old params implied VCO=1800 MHz, out of range -> never locks). New:
+  CLKFB_DIV=16/CLKOP_DIV=6/CLKOS_DIV=12, PDC generated clock x16. All CLK_HZ constants
+  (trigger_generator, ov9281_init, i2c_master, csi2_tx REF_CLOCK_FREQ) follow.
+- i2c_slave fully REWRITTEN: old FSM drove ACK during bit-8's high phase (SDA falling
+  while SCL high = spurious START) and released before clock 9 -> host always saw NACK;
+  the Jetson could never talk to the FPGA. New FSM: sample on rise, drive only while SCL
+  low, ACK spans the whole 9th clock, read bytes prefetched (also fixes stale first
+  read byte + auto-increment).
+- trigger_generator: runtime division (CLK_FREQ_HZ/fps combinational divider) replaced
+  with a phase accumulator (exact average rate, <=1 clk jitter, trivially meets timing).
+- csi2_rx: aligner false-lock recovery watchdog (3 consecutive header-ECC errors or
+  ~170 ms locked-but-idle -> re-hunt); parser/aligner also held in reset while camera
+  disabled (enable synced into byte domain).
+- Truncated-packet hang escapes: tx_arbiter aborts ST_PAY on unexpected SOP head or
+  ~0.3 ms stall; csi2_tx terminates/drops a packet whose payload FIFO stays empty ~40 us.
+  Frame buffers get per-camera DUAL-side resets (wr AND rd gated by cam_enable[i]), so
+  disable/re-enable flushes pointers coherently.
+- i2c_master holds SCL low between bytes of an open transaction (bus_open) instead of
+  floating both lines; config_regs CTRL bit1 (soft reset) now truly self-clearing;
+  LED[1]/LED[2] pulses stretched ~44 ms (pulse_stretch in cdc.sv); tb decl-order +
+  meaningful RX-error check.
+
 ### Remaining known items
 - ov9281_init INIT_ROM is a structural placeholder: paste the production OV9281 register
   table (1280x800 RAW10, 2-lane, PLL for 27 MHz XCLK, external-trigger/FSIN mode, VTS for
   30 fps) between the marked rows.
 - mipi_dphy_tx CM/CN/CO divider parameters are placeholders; take them from an IP Catalog
-  run for the chosen clk_ref and line rate before synthesis.
-- i2c_slave loads reg_rdata one cycle before config_regs registers it -> first host READ
-  byte can be stale; auto-increment multi-byte reads off-by-one. Writes unaffected. Fix
-  needs sim validation (make config_regs read combinational or rework slave load timing).
-- Simulation not yet run locally (no simulator installed); tb_chronos_csi2 is ready for
-  ModelSim/Questa.
+  run for clk_ref = 192 MHz and the chosen line rate before synthesis. chronos_pll should
+  also be regenerated via IP Catalog for the tool-blessed settings of the x16 ratio.
+### Simulation status (2026-07: SIMULATED AND PASSING)
+Icarus Verilog (OSS CAD Suite, in %LOCALAPPDATA%\oss-cad-suite\bin) now runs locally:
+- tb_chronos_csi2 PASS (3 packets decoded, 0 errors). Sim caught a real bug: the RX word
+  aligner locked one cycle late, losing the first packet after every (re)lock -> csi2_rx now
+  hunts combinationally and uses the hunt offset in the lock cycle.
+- tb_i2c_slave PASS (new BFM tb): addressing ACK, write/readback, auto-inc multi-read
+  (ID_L/ID_H) and multi-write (PULSE_WIDTH), self-clearing soft reset, foreign-address NACK,
+  STATUS pack. The rewritten i2c_slave is validated against config_regs.
+- tb_trigger_generator PASS (new tb, scaled clock): exactly N pulses/sec incl. non-divisor
+  rates (7 fps), pulse width, >MAX clamp to 30, disable.
+- Icarus portability: no 'ref' task args, no ternaries on enums/state types, found-guard
+  instead of 'break' in always_comb for-loops (tx_arbiter/csi2_rx/csi2_tx/tb adjusted).
 
 ### Bandwidth ceiling (hard constraint)
 4 cams x 2 lanes x 800 Mbps = 6.4 Gbps input. TX to Jetson is 2 lanes; hard D-PHY ~2.5 Gbps/lane
@@ -143,6 +176,33 @@ The agreed path: rebuild the MIPI subsystem on Lattice D-PHY IP + a corrected CS
 layer, add the camera SCCB config path, fix datapath/clocking/constraints, and bring up in
 phases (sim first, then hardware: 1 cam -> loopback -> 4 cam + VC -> FSIN sync).
 Detailed plan: `.cursor/plans/chronos_mipi_rebuild_*.plan.md`.
+
+---
+
+## 5b. Jetson side (app/ + drivers/) - REWORKED (2026-07, after review)
+
+Both trees were rebuilt to match the real architecture (review findings all addressed):
+- drivers/: NEW chronos_fpga/ I2C driver ("chronos,fpga-ctrl" @0x3C, regmap_i2c, sysfs
+  trigger_enable/frame_rate/pulse_width/cam_enable/status/error/frame_count/version/id,
+  exported API incl. chronos_fpga_get_client with EPROBE_DEFER). chronos_csi.c REWRITTEN
+  as an async V4L2 subdev bridge ("chronos,csi-bridge", one source pad, Y10_1X10
+  1280x800, s_stream toggles FSIN via the FPGA driver) - all fake /dev/video + vb2 code
+  removed (Tegra VI owns video nodes). chronos-orin-nx.dts REWRITTEN: FPGA @3c + one
+  2-lane bridge->NVCSI->VI graph with 4 VI channels (vc-id 0..3); fictional i2c-mux,
+  4x ov9281 nodes, Jetson spi0 IMU, reserved-memory all removed. ov9281/ and imu/ are
+  QUARANTINED (do-not-load warning headers; excluded from top-level drivers/Makefile).
+  Nothing compiled yet (no L4T tree here) - first build must check the 5.10/5.15
+  v4l2_subdev state-arg version switch in chronos_csi.c.
+- app/: chronos_capture.c reworked around V4L2 MMAP capture (NvBuffer/EGL path DELETED;
+  CUDA is now an optional pitch-aware cudaMemcpy2D upload, CHRONOS_WITH_CUDA in CMake).
+  Consumer-owned buffer lifecycle: capture thread never requeues; release_frame_set does
+  VIDIOC_QBUF via an in-flight table. CTRL(0x00) written on start/stop per
+  external_trigger; VERSION/ID verified at init (warn-only). get_frame_set loops on the
+  cond var, -1 = infinite. Stats populated (fps, skew, seq-gap drops, fpga_status/error
+  via persistent I2C fd). sync_valid = timestamp spread + STATUS bits. New config field
+  fsin_pulse_width_cycles (0 = 2000-cycle default), pulse width decoupled from exposure.
+  chronos_frame_t: dmabuf_fd/nvbuf_fd fields REMOVED (data = mmap pointer). sync_test
+  defaults to 30 fps. Nothing compiled yet (needs Jetson/CUDA toolchain).
 
 ---
 
