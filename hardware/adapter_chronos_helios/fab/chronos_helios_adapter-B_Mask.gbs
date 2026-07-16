@@ -1,0 +1,29 @@
+%TF.GenerationSoftware,KiCad,Pcbnew,10.0.3*%
+%TF.CreationDate,2026-07-16T14:07:11-05:00*%
+%TF.ProjectId,chronos_helios_adapter,6368726f-6e6f-4735-9f68-656c696f735f,1*%
+%TF.SameCoordinates,Original*%
+%TF.FileFunction,Soldermask,Bot*%
+%TF.FilePolarity,Negative*%
+%FSLAX46Y46*%
+G04 Gerber Fmt 4.6, Leading zero omitted, Abs format (unit mm)*
+G04 Created by KiCad (PCBNEW 10.0.3) date 2026-07-16 14:07:11*
+%MOMM*%
+%LPD*%
+G01*
+G04 APERTURE LIST*
+%ADD10C,2.300000*%
+G04 APERTURE END LIST*
+D10*
+%TO.C,H4*%
+X123700000Y-120700000D03*
+%TD*%
+%TO.C,H3*%
+X100300000Y-120700000D03*
+%TD*%
+%TO.C,H1*%
+X100300000Y-100300000D03*
+%TD*%
+%TO.C,H2*%
+X123700000Y-100300000D03*
+%TD*%
+M02*

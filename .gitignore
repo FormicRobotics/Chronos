@@ -17,6 +17,17 @@ fpga/blinky/sysconfig_help.txt
 fpga/blinky/promote.pfl
 fpga/blinky/promote.xml
 
+# Simulation build artifacts (Icarus Verilog)
+fpga/sim/*.out
+fpga/sim/*.vcd
+
+# KiCad local history / autosave / lock files
+hardware/adapter_chronos_helios/.history/
+*.kicad_prl
+~*.lck
+_autosave-*
+*-bak
+
 # Generic Radiant generated file types
 *.udb
 *.vdb
