@@ -34,7 +34,7 @@ module tb_chronos_csi2;
     // Clocks / reset
     //--------------------------------------------------------------------------
     logic clk_sys = 1'b0;
-    always #2.5 clk_sys = ~clk_sys;   // 200 MHz reference
+    always #2.604 clk_sys = ~clk_sys;   // ~192 MHz reference (chronos_pll clk_sys)
 
     logic rst_n      = 1'b0;
     logic pll_locked = 1'b0;
@@ -160,11 +160,13 @@ module tb_chronos_csi2;
         u_rx0.u_dphy_rx.feed(b2, b3);
     endtask
 
-    // payload passed as a dynamic array of bytes; len even for simplicity
-    task automatic feed_long(input logic [1:0] vc, input logic [5:0] dt,
-                             ref byte unsigned pay []);
+    // payload taken from module-scope line_pay (Icarus does not support 'ref'
+    // task ports); len even for simplicity
+    byte unsigned line_pay [];
+
+    task automatic feed_long(input logic [1:0] vc, input logic [5:0] dt);
         int len; logic [15:0] wc, crc; logic [7:0] b3; int k;
-        len = pay.size();
+        len = line_pay.size();
         wc  = len[15:0];
         b3  = calc_ecc({wc, vc, dt});
         u_rx0.u_dphy_rx.feed(SYNC_BYTE, SYNC_BYTE);
@@ -172,9 +174,9 @@ module tb_chronos_csi2;
         u_rx0.u_dphy_rx.feed(wc[15:8], b3);
         crc = 16'hFFFF;
         for (k = 0; k < len; k += 2) begin
-            u_rx0.u_dphy_rx.feed(pay[k], pay[k+1]);
-            crc = crc16_step(crc, pay[k]);
-            crc = crc16_step(crc, pay[k+1]);
+            u_rx0.u_dphy_rx.feed(line_pay[k], line_pay[k+1]);
+            crc = crc16_step(crc, line_pay[k]);
+            crc = crc16_step(crc, line_pay[k+1]);
         end
         u_rx0.u_dphy_rx.feed(crc[7:0], crc[15:8]);
     endtask
@@ -229,10 +231,15 @@ module tb_chronos_csi2;
         pkt_count++;
     endtask
 
+    // Any RX protocol error during the run is a failure (counted here so the
+    // final check is meaningful; a single-cycle pulse is easy to miss).
+    int rx_err_seen = 0;
+    always @(posedge rx0_byte_clk) if (rx0_err) rx_err_seen++;
+
     //--------------------------------------------------------------------------
     // Test sequence
     //--------------------------------------------------------------------------
-    byte unsigned line_pay [];
+    logic [5:0]   dt_fs, dt_ln, dt_fe;
 
     initial begin
         // build a 16-byte RAW10 payload
@@ -248,7 +255,7 @@ module tb_chronos_csi2;
         feed_idle(8);
         feed_short(2'd0, DT_FRAME_START, 16'h0001);
         feed_idle(4);
-        feed_long (2'd0, DT_RAW10, line_pay);
+        feed_long (2'd0, DT_RAW10);
         feed_idle(4);
         feed_short(2'd0, DT_FRAME_END, 16'h0001);
         feed_idle(16);
@@ -261,7 +268,8 @@ module tb_chronos_csi2;
         decode_packet(2'd0, dt_fe);
         check((dt_fe == DT_FRAME_END), "third TX packet is FE");
 
-        check((rx0_err === 1'b0 || rx0_err === 1'b1), "rx error observable");
+        check((rx_err_seen == 0),
+              $sformatf("no RX protocol errors during test (saw %0d)", rx_err_seen));
 
         #200;
         $display("==================================================");
@@ -272,8 +280,6 @@ module tb_chronos_csi2;
         $display("==================================================");
         $finish;
     end
-
-    logic [5:0] dt_fs, dt_ln, dt_fe;
 
     // global watchdog
     initial begin

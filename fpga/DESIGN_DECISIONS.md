@@ -18,9 +18,19 @@ Decisions locked for the MIPI subsystem rebuild. See `.cursor/plans/chronos_mipi
 - Frame rate is set by the FPGA FSIN trigger, NOT by the sensor free-running. All 4 cameras run in
   external-trigger (slave) mode and expose on each FSIN pulse, so the FPGA's trigger period defines the
   synchronized 30 fps. Defaults are wired for this:
-    * `config_regs` powers up `frame_rate = 30` (REG 0x01) and `pulse_width = 2000` cyc (~10 us @200 MHz).
-    * `trigger_generator` resets to a 30 fps period (`compute_period(30)`), single physical FSIN pin
+    * `config_regs` powers up `frame_rate = 30` (REG 0x01) and `pulse_width = 2000` cyc (~10.4 us @192 MHz).
+    * `trigger_generator` resets to 30 fps. Rate engine is a PHASE ACCUMULATOR (adds fps per clk, fires
+      on wrap of CLK_FREQ_HZ) - exact average rate, no runtime divider. Single physical FSIN pin
       (R9) fanned out on the PCB to all cameras + IMU + sync header.
+
+## System clock (12 MHz ref -> PLL)
+- clk_sys = 192 MHz, NOT 200: with FEEDBK_PATH=CLKOP the CLKOP frequency must be an integer
+  multiple of the 12 MHz phase-detector frequency, and 200/12 is not an integer (dividing the PD
+  below 10 MHz is out of spec). 192 = 12 x 16; VCO = 192 x 6 = 1152 MHz (in the 800-1600 range).
+  The original CLKFB_DIV=50/CLKOP_DIV=3 set implied VCO=1800 MHz - the PLL could never lock.
+- Everything that counts cycles is parameterized: trigger_generator/ov9281_init/i2c_master take
+  CLK_HZ=192_000_000 from chronos_top; csi2_tx REF_CLOCK_FREQ=192 (regenerate D-PHY TX CM/CN/CO
+  for a 192 MHz CLKREF in the IP Catalog).
   => 30 fps needs no RTL change; the OV9281 init table just has to put the sensor in external-trigger
   mode with VTS large enough for the 30 fps exposure window.
 

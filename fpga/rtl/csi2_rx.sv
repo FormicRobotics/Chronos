@@ -22,10 +22,11 @@
 import csi2_pkg::*;
 
 module csi2_rx #(
-    parameter int NUM_LANES   = 2,
-    parameter int CAMERA_ID   = 0,
-    parameter int GEAR        = 8,
-    parameter bit BIT_REVERSE = 1'b0   // set if IDDRX4 captures MSB-first
+    parameter int NUM_LANES           = 2,
+    parameter int CAMERA_ID           = 0,
+    parameter int GEAR                = 8,
+    parameter bit BIT_REVERSE         = 1'b0, // set if IDDRX4 captures MSB-first
+    parameter int RESYNC_TIMEOUT_LOG2 = 24    // idle byte clocks before realign
 )(
     input  wire        clk_sys,        // reference clock for D-PHY GDDR calibration
     input  wire        rst_n,
@@ -84,11 +85,20 @@ module csi2_rx #(
         .data_n_io  (dphy_data_n)
     );
 
-    // reset into byte-clock domain (released after IP calibration)
+    // enable, synchronised into the byte-clock domain (quasi-static)
+    logic en_meta, en_sync;
+    always_ff @(posedge byte_clk or negedge rst_n) begin
+        if (!rst_n) begin en_meta <= 1'b0; en_sync <= 1'b0; end
+        else        begin en_meta <= enable; en_sync <= en_meta; end
+    end
+
+    // reset into byte-clock domain (released after IP calibration; also held
+    // while the camera is disabled so the aligner/parser restart cleanly on
+    // re-enable instead of resuming from a stale mid-packet state)
     logic brst_n_meta, brst_n;
     always_ff @(posedge byte_clk or negedge rst_n) begin
         if (!rst_n) begin brst_n_meta <= 1'b0; brst_n <= 1'b0; end
-        else        begin brst_n_meta <= dphy_ready; brst_n <= brst_n_meta; end
+        else        begin brst_n_meta <= dphy_ready & en_sync; brst_n <= brst_n_meta; end
     end
 
     //--------------------------------------------------------------------------
@@ -110,25 +120,43 @@ module csi2_rx #(
     // Per-lane word aligner: detect 0xB8 across the 8 bit offsets, lock the
     // offset, then emit one aligned byte/cycle. hist holds the previous cycle's
     // bits so an aligned byte can straddle the cycle boundary.
+    //
+    // The hunt is COMBINATIONAL and the aligned byte uses the hunt offset in
+    // the same cycle the sync byte is found (simulation caught this: with a
+    // registered-only lock, all_locked went high one cycle after the sync byte
+    // had already passed, so the FIRST packet after every (re)lock was lost).
     //--------------------------------------------------------------------------
     logic [7:0] hist [NUM_LANES];
-    logic [2:0] shift [NUM_LANES];
+    logic [2:0] shift [NUM_LANES];       // registered (locked) offset
     logic       locked [NUM_LANES];
+    logic       hunt_hit [NUM_LANES];    // sync byte found this cycle
+    logic [2:0] hunt_shift [NUM_LANES];  // lowest matching offset this cycle
     logic [7:0] aligned [NUM_LANES];
-    logic       all_locked;
+    logic       all_locked;              // effective: locked or locking now
+    logic       realign;      // driven by the recovery watchdog below the FSM
 
     always_comb begin
         for (int l = 0; l < NUM_LANES; l++) begin
             logic [15:0] win;
-            win        = {raw[l], hist[l]};
-            aligned[l] = win[shift[l] +: 8];
+            logic [2:0]  sh_eff;
+            win           = {raw[l], hist[l]};
+            hunt_hit[l]   = 1'b0;
+            hunt_shift[l] = 3'd0;
+            // Lowest bit offset whose byte == 0xB8 wins (guard keeps the first).
+            for (int s = 0; s < 8; s++)
+                if (!hunt_hit[l] && (win[s +: 8] == SYNC_BYTE)) begin
+                    hunt_hit[l]   = 1'b1;
+                    hunt_shift[l] = s[2:0];
+                end
+            sh_eff     = locked[l] ? shift[l] : hunt_shift[l];
+            aligned[l] = win[sh_eff +: 8];
         end
     end
 
     always_comb begin
         all_locked = 1'b1;
         for (int l = 0; l < NUM_LANES; l++)
-            all_locked &= locked[l];
+            all_locked &= (locked[l] | hunt_hit[l]);
     end
 
     genvar gl;
@@ -141,20 +169,11 @@ module csi2_rx #(
                     locked[gl] <= 1'b0;
                 end else begin
                     hist[gl] <= raw[gl];
-                    if (!locked[gl]) begin
-                        logic [15:0] win;
-                        logic        found;
-                        win   = {raw[gl], hist[gl]};
-                        found = 1'b0;
-                        // Lock onto the LOWEST bit offset whose byte == 0xB8.
-                        // 'found' guards against later offsets overwriting it
-                        // (without it, the highest matching offset would win).
-                        for (int s = 0; s < 8; s++)
-                            if (!found && (win[s +: 8] == SYNC_BYTE)) begin
-                                shift[gl]  <= s[2:0];
-                                locked[gl] <= 1'b1;
-                                found       = 1'b1;
-                            end
+                    if (realign) begin
+                        locked[gl] <= 1'b0;
+                    end else if (!locked[gl] && hunt_hit[gl]) begin
+                        shift[gl]  <= hunt_shift[gl];
+                        locked[gl] <= 1'b1;
                     end
                 end
             end
@@ -178,6 +197,7 @@ module csi2_rx #(
     logic [15:0] rem;
     logic [1:0]  word_fill;
     logic [31:0] word_acc;
+    logic        hdr_err;      // header ECC failure (feeds the realign watchdog)
 
     always_ff @(posedge byte_clk or negedge brst_n) begin
         if (!brst_n) begin
@@ -192,11 +212,13 @@ module csi2_rx #(
             sop_fs <= 1'b0; sop_fe <= 1'b0; sop_ls <= 1'b0; sop_le <= 1'b0;
             pay_valid <= 1'b0; pay_data <= 32'd0; pay_last <= 1'b0;
             error     <= 1'b0;
+            hdr_err   <= 1'b0;
         end else begin
             sop_valid <= 1'b0;
             sop_fs <= 1'b0; sop_fe <= 1'b0; sop_ls <= 1'b0; sop_le <= 1'b0;
             pay_valid <= 1'b0; pay_last <= 1'b0;
             error     <= 1'b0;
+            hdr_err   <= 1'b0;
 
             unique case (state)
                 //--------------------------------------------------------------
@@ -221,8 +243,9 @@ module csi2_rx #(
                     wc_full = {b_even, wc_lo};
                     shortp  = is_short_packet(dt);
                     if (calc_ecc({wc_full, vc, dt}) != b_odd) begin
-                        error <= 1'b1;
-                        state <= ST_SYNC;
+                        error   <= 1'b1;
+                        hdr_err <= 1'b1;
+                        state   <= ST_SYNC;
                     end else begin
                         sop_valid <= 1'b1;
                         sop_vc    <= vc;
@@ -295,6 +318,51 @@ module csi2_rx #(
                 end
                 default: state <= ST_SYNC;
             endcase
+        end
+    end
+
+    //--------------------------------------------------------------------------
+    // Alignment recovery watchdog
+    //--------------------------------------------------------------------------
+    // The one-shot aligner can false-lock on line garbage captured during
+    // LP<->HS transitions (the soft PHY has no data-valid qualifier), and a
+    // camera restart may move the true bit offset. Two recovery triggers:
+    //   * 3 consecutive header ECC failures -> realign (a wrong offset shows
+    //     up as ECC errors long before any valid packet parses);
+    //   * locked but no packet parsed for 2^RESYNC_TIMEOUT_LOG2 byte clocks
+    //     (~170 ms at 100 MHz, i.e. many 33 ms frame periods, so inter-frame
+    //     blanking can never trigger it) -> realign.
+    //--------------------------------------------------------------------------
+    logic [RESYNC_TIMEOUT_LOG2:0] idle_cnt;
+    logic [1:0]                   hdr_err_cnt;
+
+    always_ff @(posedge byte_clk or negedge brst_n) begin
+        if (!brst_n) begin
+            idle_cnt    <= '0;
+            hdr_err_cnt <= 2'd0;
+            realign     <= 1'b0;
+        end else begin
+            realign <= 1'b0;
+
+            if (sop_valid) begin
+                idle_cnt    <= '0;
+                hdr_err_cnt <= 2'd0;
+            end else if (hdr_err) begin
+                idle_cnt <= '0;
+                if (hdr_err_cnt == 2'd2) begin
+                    realign     <= 1'b1;
+                    hdr_err_cnt <= 2'd0;
+                end else begin
+                    hdr_err_cnt <= hdr_err_cnt + 2'd1;
+                end
+            end else if (!all_locked || state != ST_SYNC) begin
+                idle_cnt <= '0;
+            end else if (idle_cnt[RESYNC_TIMEOUT_LOG2]) begin
+                idle_cnt <= '0;
+                realign  <= 1'b1;
+            end else begin
+                idle_cnt <= idle_cnt + 1'b1;
+            end
         end
     end
 

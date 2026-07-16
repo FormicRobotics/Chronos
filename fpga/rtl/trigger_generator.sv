@@ -13,18 +13,13 @@
 // FSIN pins separately (kept here so the register map stays stable for future
 // hardware revisions where per-output skew tuning is possible).
 //
-// Bugs fixed vs. the previous revision:
-//   * trigger_delay was sized [4] but indexed up to NUM_OUTPUTS-1 = 4 → out
-//     of bounds when NUM_OUTPUTS was 5.  Array now sized to the parameter.
-//   * Delayed output never followed the master pulse width correctly because
-//     delay_active was cleared before delay_cnt actually reached zero, so
-//     "delayed_trigger" briefly dropped before the pulse completed.  The new
-//     logic uses a single shift register that mirrors the master pulse with
-//     a programmable delay; pulse width is preserved by construction.
-//   * frame_period was a non-blocking assignment to a non-registered output;
-//     it could lag by one cycle after a rate change.  The new pulse engine
-//     latches the period once at every wrap, so the period that is in
-//     flight is always consistent.
+// Rate generation: a phase accumulator adds `fps` every clock and fires a
+// trigger when it wraps CLK_FREQ_HZ.  The previous revision computed
+// CLK_FREQ_HZ / fps with a runtime divisor - a ~28-bit combinational divider
+// sitting in the clk_sys datapath that cannot close timing at ~200 MHz.  The
+// accumulator needs only an adder and a compare; the average rate is EXACT
+// (including rates that do not divide CLK_FREQ_HZ) and edge jitter is at most
+// one clk cycle, which is irrelevant for a camera FSIN.
 //
 //==============================================================================
 
@@ -33,7 +28,7 @@
 
 module trigger_generator #(
     parameter int NUM_OUTPUTS    = 4,
-    parameter int CLK_FREQ_HZ    = 200_000_000,
+    parameter int CLK_FREQ_HZ    = 192_000_000,
     parameter int MAX_FRAME_RATE = 120
 )(
     input  wire                 clk,
@@ -51,61 +46,60 @@ module trigger_generator #(
     //--------------------------------------------------------------------------
     // Local constants
     //--------------------------------------------------------------------------
-    localparam int MIN_PERIOD          = CLK_FREQ_HZ;                  // 1 fps
-    localparam int CNT_W               = $clog2(MIN_PERIOD) + 1;
+    localparam int ACC_W               = $clog2(CLK_FREQ_HZ) + 1;
     localparam int DEFAULT_PULSE_CYCLES= CLK_FREQ_HZ / 100_000;        // 10 us
     localparam int MAX_DELAY           = 256;                          // 8-bit
     // Largest shift register we will need = max delay we can program.
     localparam int DELAY_SR_DEPTH      = MAX_DELAY;
 
     //--------------------------------------------------------------------------
-    // Pulse period engine
+    // Pulse period engine: fractional phase accumulator, no divider.
+    //   acc += fps each cycle; when acc crosses CLK_FREQ_HZ, subtract it back
+    //   and fire.  Pulses/second therefore averages exactly `fps`.
     //--------------------------------------------------------------------------
-    logic [CNT_W-1:0]  period_count;
-    logic [CNT_W-1:0]  frame_period;
+    logic [ACC_W-1:0]  acc;
+    logic [7:0]        fps_lat;              // rate latched at each pulse start
     logic [15:0]       pulse_cnt;
     logic [15:0]       pulse_w_eff;          // pulse width actually used
 
-    // Latch a sane period at every wrap so the in-flight period is stable.
-    function automatic logic [CNT_W-1:0] compute_period(input logic [7:0] fps);
-        if (fps == 0 || fps > MAX_FRAME_RATE)
-            return CLK_FREQ_HZ / 30;
-        return CLK_FREQ_HZ / fps;
-    endfunction
+    // Sanitised rate request (0 or out-of-range falls back to 30 fps).
+    wire [7:0] fps_req = (frame_rate == 8'd0 || frame_rate > MAX_FRAME_RATE[7:0])
+                       ? 8'd30 : frame_rate;
+
+    wire [ACC_W-1:0] acc_next = acc + {{(ACC_W-8){1'b0}}, fps_lat};
+    wire             fire     = acc_next >= CLK_FREQ_HZ[ACC_W-1:0];
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            period_count   <= '0;
-            pulse_cnt      <= '0;
-            frame_period   <= compute_period(8'd30);
-            pulse_w_eff    <= DEFAULT_PULSE_CYCLES[15:0];
-            trigger_pulse  <= 1'b0;
+            acc           <= CLK_FREQ_HZ[ACC_W-1:0];   // first pulse fires at once
+            fps_lat       <= 8'd30;
+            pulse_cnt     <= '0;
+            pulse_w_eff   <= DEFAULT_PULSE_CYCLES[15:0];
+            trigger_pulse <= 1'b0;
         end else if (!enable) begin
-            period_count  <= '0;
+            acc           <= CLK_FREQ_HZ[ACC_W-1:0];   // re-arm for prompt start
+            fps_lat       <= fps_req;
             pulse_cnt     <= '0;
             trigger_pulse <= 1'b0;
+        end else if (fire) begin
+            acc           <= acc_next - CLK_FREQ_HZ[ACC_W-1:0];
+            pulse_cnt     <= 16'd1;                    // start a new pulse
+            trigger_pulse <= 1'b1;
+            // Latch any rate/width change once per period boundary.
+            fps_lat       <= fps_req;
+            pulse_w_eff   <= (pulse_width == 16'd0)
+                              ? DEFAULT_PULSE_CYCLES[15:0]
+                              : pulse_width;
         end else begin
-            // Period counter
-            if (period_count >= frame_period - 1) begin
-                period_count <= '0;
-                pulse_cnt    <= 16'd1;                     // start a new pulse
-                trigger_pulse<= 1'b1;
-                // Latch any rate/width change once per period boundary.
-                frame_period <= compute_period(frame_rate);
-                pulse_w_eff  <= (pulse_width == 16'd0)
-                                 ? DEFAULT_PULSE_CYCLES[15:0]
-                                 : pulse_width;
-            end else begin
-                period_count <= period_count + 1'b1;
+            acc <= acc_next;
 
-                if (pulse_cnt != 16'd0) begin
-                    if (pulse_cnt >= pulse_w_eff) begin
-                        pulse_cnt     <= 16'd0;
-                        trigger_pulse <= 1'b0;
-                    end else begin
-                        pulse_cnt     <= pulse_cnt + 1'b1;
-                        trigger_pulse <= 1'b1;
-                    end
+            if (pulse_cnt != 16'd0) begin
+                if (pulse_cnt >= pulse_w_eff) begin
+                    pulse_cnt     <= 16'd0;
+                    trigger_pulse <= 1'b0;
+                end else begin
+                    pulse_cnt     <= pulse_cnt + 1'b1;
+                    trigger_pulse <= 1'b1;
                 end
             end
         end

@@ -113,7 +113,7 @@ module chronos_top #(
 
     trigger_generator #(
         .NUM_OUTPUTS    (NUM_CAMERAS),
-        .CLK_FREQ_HZ    (200_000_000),
+        .CLK_FREQ_HZ    (192_000_000),   // = chronos_pll clk_sys
         .MAX_FRAME_RATE (MAX_FRAME_RATE)
     ) u_trigger_gen (
         .clk(clk_sys), .rst_n(sys_rst_n),
@@ -214,8 +214,19 @@ module chronos_top #(
                 .error(rx_err)
             );
 
+            // Per-camera resets: BOTH frame_buffer sides reset while the camera
+            // is disabled, so a disable/re-enable flushes any partial packet
+            // coherently (write and read pointers both return to zero). The
+            // cam_enable bits are clk_sys registers used only as asynchronous
+            // reset asserts; release is synchronised by reset_sync.
             reset_sync u_rx_rst (
-                .clk(rx_byte_clk[i]), .rst_n_async(rst_n), .rst_n_sync(rx_rst_n[i])
+                .clk(rx_byte_clk[i]), .rst_n_async(rst_n & cam_enable[i]),
+                .rst_n_sync(rx_rst_n[i])
+            );
+            wire fb_rd_rst_n;
+            reset_sync u_fb_rd_rst (
+                .clk(tx_byte_clk), .rst_n_async(rst_n & tx_ready & cam_enable[i]),
+                .rst_n_sync(fb_rd_rst_n)
             );
 
             // token write port
@@ -232,7 +243,7 @@ module chronos_top #(
                 .wr_clk(rx_byte_clk[i]), .wr_rst_n(rx_rst_n[i]),
                 .wr_en(wr_en), .wr_is_sop(wr_is_sop), .wr_last(wr_last),
                 .wr_data(wr_data), .full(), .overflow(fb_overflow),
-                .rd_clk(tx_byte_clk), .rd_rst_n(tx_rst_n),
+                .rd_clk(tx_byte_clk), .rd_rst_n(fb_rd_rst_n),
                 .rd_en(buf_rd_en[i]), .rd_valid(buf_rd_valid[i]),
                 .rd_is_sop(buf_rd_is_sop[i]), .rd_last(buf_rd_last[i]),
                 .rd_data(buf_rd_data[i]), .empty(), .pkt_avail(buf_pkt_avail[i])
@@ -243,7 +254,7 @@ module chronos_top #(
             // J3-17 (cam0) and J5-17 (cam2) are grounded  -> SID=0 -> 7-bit 0x60;
             // J4-17 (cam1) and J6-17 (cam3) are pulled to VCCIO6 -> SID=1 -> 0x10.
             ov9281_init #(
-                .CLK_HZ  (200_000_000),
+                .CLK_HZ  (192_000_000),   // = chronos_pll clk_sys
                 .DEV_ADDR((i % 2 == 0) ? 7'h60 : 7'h10)
             ) u_cam_cfg (
                 .clk(clk_sys), .rst_n(sys_rst_n),
@@ -312,10 +323,18 @@ module chronos_top #(
     //==========================================================================
     // Status LEDs. ACTIVE-LOW: D3..D6 hang from VCCIO1 through R174..R177 and
     // the FPGA pin sinks the cathode (netlist; same topology as D17/INITN).
+    // Frame/trigger events are single-cycle or microsecond pulses, so they are
+    // stretched to ~44 ms to be visible to a human.
     //==========================================================================
+    wire frame_led, trig_led;
+    pulse_stretch u_led_frame (.clk(clk_sys), .rst_n(sys_rst_n),
+                               .pulse(|frame_pulse_sys), .q(frame_led));
+    pulse_stretch u_led_trig  (.clk(clk_sys), .rst_n(sys_rst_n),
+                               .pulse(trigger_pulse),    .q(trig_led));
+
     assign led_status[0] = ~pll_locked;
-    assign led_status[1] = ~|frame_pulse_sys;
-    assign led_status[2] = ~trigger_pulse;
+    assign led_status[1] = ~frame_led;
+    assign led_status[2] = ~trig_led;
     assign led_status[3] = ~((|rx_error_sys) | (|buf_overflow_sys));
 
     /* verilator lint_off UNUSED */

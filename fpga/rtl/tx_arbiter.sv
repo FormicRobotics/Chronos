@@ -52,15 +52,17 @@ module tx_arbiter #(
     logic [CW-1:0] cur, nxt;
 
     // round-robin next camera with a complete packet whose head is a SOP
+    // (found-guard instead of 'break' for simulator portability)
     always_comb begin
-        nxt = cur;
+        logic found;
+        nxt   = cur;
+        found = 1'b0;
         for (int i = 1; i <= NUM_CAMERAS; i++) begin
             logic [CW-1:0] c;
-            c = (cur + i[CW-1:0]);
-            if (c >= NUM_CAMERAS[CW-1:0]) c = c - NUM_CAMERAS[CW-1:0];
-            if (buf_pkt_avail[c] && buf_rd_valid[c] && buf_rd_is_sop[c]) begin
-                nxt = c;
-                break;
+            c = CW'((int'(cur) + i) % NUM_CAMERAS);
+            if (!found && buf_pkt_avail[c] && buf_rd_valid[c] && buf_rd_is_sop[c]) begin
+                nxt   = c;
+                found = 1'b1;
             end
         end
     end
@@ -93,6 +95,23 @@ module tx_arbiter #(
         endcase
     end
 
+    // Hang escapes. A camera disable/unplug mid-packet can leave a TRUNCATED
+    // packet in a frame_buffer (its 'last' token never arrives) or empty the
+    // buffer under us (per-camera FIFO reset). Without an escape the FSM would
+    // wait in ST_PAY forever and stall all four cameras. Abort the in-flight
+    // packet if the head token is unexpectedly a SOP, or if the buffer stays
+    // silent mid-packet for 2^15 byte clocks (~0.3 ms; a legitimate packet is
+    // fully buffered upstream and never stalls). csi2_tx has its own matching
+    // underflow escape for the packet it is transmitting.
+    logic [15:0] stall_cnt;
+    wire         stall_abort = stall_cnt[15];
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                            stall_cnt <= '0;
+        else if (state != ST_PAY || pay_valid) stall_cnt <= '0;
+        else                                   stall_cnt <= stall_cnt + 1'b1;
+    end
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= ST_SEL;
@@ -106,12 +125,16 @@ module tx_arbiter #(
                     end
                 end
                 ST_SOP: begin
-                    if (sop_ready)
-                        state <= sop_short_f(head) ? ST_SEL : ST_PAY;
+                    if (sop_ready) begin
+                        if (sop_short_f(head)) state <= ST_SEL;
+                        else                   state <= ST_PAY;
+                    end
                 end
                 ST_PAY: begin
                     if (pay_valid && pay_ready && buf_rd_last[cur])
                         state <= ST_SEL;
+                    else if ((buf_rd_valid[cur] && buf_rd_is_sop[cur]) || stall_abort)
+                        state <= ST_SEL;   // truncated packet: abort
                 end
                 default: state <= ST_SEL;
             endcase

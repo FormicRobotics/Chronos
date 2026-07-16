@@ -31,10 +31,10 @@
 `default_nettype none
 
 module ov9281_init #(
-    parameter int  CLK_HZ        = 200_000_000,
+    parameter int  CLK_HZ        = 192_000_000,
     parameter int  SCL_HZ        = 400_000,
     parameter [6:0] DEV_ADDR     = 7'h60,
-    parameter int  PUP_DELAY_CYC = 200_000   // ~1 ms @200 MHz after reset release
+    parameter int  PUP_DELAY_CYC = 200_000   // ~1 ms @192 MHz after reset release
 )(
     input  wire  clk,
     input  wire  rst_n,

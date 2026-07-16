@@ -16,7 +16,7 @@
 `default_nettype none
 
 module i2c_master #(
-    parameter int CLK_HZ = 200_000_000,
+    parameter int CLK_HZ = 192_000_000,
     parameter int SCL_HZ = 400_000
 )(
     input  wire       clk,
@@ -56,6 +56,7 @@ module i2c_master #(
     logic [7:0]  sh;         // shift register
     logic [7:0]  data_l;
     logic        last_l;
+    logic        bus_open;    // START emitted, STOP not yet: hold SCL low in idle
 
     wire qtick = (qcnt == QDIV[15:0]-1);
 
@@ -89,13 +90,18 @@ module i2c_master #(
             tx_ready  <= 1'b0;
             busy      <= 1'b0;
             ack_error <= 1'b0;
+            bus_open  <= 1'b0;
         end else begin
             tx_ready <= 1'b0;
 
             unique case (st)
                 //--------------------------------------------------------------
                 S_IDLE: begin
-                    scl_oe <= 1'b0;
+                    // Between bytes of an open transaction keep SCL driven low
+                    // (clock stretching); releasing both lines mid-transaction
+                    // would look like a STOP to the slave once the bus RC lets
+                    // the lines rise.
+                    scl_oe <= bus_open;
                     sda_oe <= 1'b0;
                     q      <= 2'd0;
                     if (tx_valid) begin
@@ -125,7 +131,11 @@ module i2c_master #(
                     endcase
                     if (qtick) begin
                         q <= q + 2'd1;
-                        if (q == 2'd3) begin bit_idx <= 4'd0; st <= S_ADDR; end
+                        if (q == 2'd3) begin
+                            bus_open <= 1'b1;
+                            bit_idx  <= 4'd0;
+                            st       <= S_ADDR;
+                        end
                     end
                 end
                 //--------------------------------------------------------------
@@ -192,7 +202,10 @@ module i2c_master #(
                     endcase
                     if (qtick) begin
                         q <= q + 2'd1;
-                        if (q == 2'd3) st <= S_DONE;
+                        if (q == 2'd3) begin
+                            bus_open <= 1'b0;
+                            st       <= S_DONE;
+                        end
                     end
                 end
                 //--------------------------------------------------------------

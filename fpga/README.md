@@ -124,15 +124,21 @@ pgrcmd -infile chronos.bit
 
 ## ⚡ Timing
 
-- System clock: 200 MHz
+- System clock: 192 MHz (12 MHz ref x 16; see chronos_pll.sv)
 - MIPI data rate: 800 Mbps/lane
 - Trigger skew: < 100 ns (20 cycles)
 
 ## 🧪 Simulation
 
-```bash
-cd tb
-vsim -do run_tests.do
+Three self-checking testbenches live in `sim/` (all PASS with Icarus Verilog):
+
+- `tb_chronos_csi2.sv` - CSI-2 datapath loopback (RX -> frame_buffer -> arbiter -> TX)
+- `tb_i2c_slave.sv` - I2C master BFM against `i2c_slave` + `config_regs`
+- `tb_trigger_generator.sv` - phase-accumulator rate engine (exact fps, clamping)
+
+```powershell
+cd sim
+powershell -File run_sims.ps1     # requires iverilog/vvp (OSS CAD Suite)
 ```
 
 ## 📝 Notes

@@ -172,7 +172,7 @@ module config_regs (
             //------------------------------------------------------------------
             ctrl_reg        <= 8'h00;           // Disabled
             frame_rate_reg  <= 8'd30;           // 30 fps
-            pulse_width_reg <= 16'd2000;        // 10µs at 200MHz
+            pulse_width_reg <= 16'd2000;        // ~10.4 us at 192 MHz clk_sys
             cam_enable_reg  <= 8'h0F;           // All 4 cameras enabled
             data_type_reg   <= 8'h2B;           // RAW10
             
@@ -181,23 +181,31 @@ module config_regs (
                 trig_delay_reg[i] <= 8'h00;
             end
             
-        end else if (wr_en) begin
+        end else begin
             //------------------------------------------------------------------
             // Register Write Handler
             //------------------------------------------------------------------
-            case (addr)
-                REG_CTRL:          ctrl_reg        <= wdata;
-                REG_FRAME_RATE:    frame_rate_reg  <= wdata;
-                REG_PULSE_WIDTH_L: pulse_width_reg[7:0]  <= wdata;
-                REG_PULSE_WIDTH_H: pulse_width_reg[15:8] <= wdata;
-                REG_CAM_ENABLE:    cam_enable_reg  <= wdata;
-                REG_DATA_TYPE:     data_type_reg   <= wdata;
-                REG_TRIG_DELAY_0:  trig_delay_reg[0] <= wdata;
-                REG_TRIG_DELAY_1:  trig_delay_reg[1] <= wdata;
-                REG_TRIG_DELAY_2:  trig_delay_reg[2] <= wdata;
-                REG_TRIG_DELAY_3:  trig_delay_reg[3] <= wdata;
-                default: ; // Ignore writes to read-only or undefined registers
-            endcase
+            if (wr_en) begin
+                case (addr)
+                    REG_CTRL:          ctrl_reg        <= wdata;
+                    REG_FRAME_RATE:    frame_rate_reg  <= wdata;
+                    REG_PULSE_WIDTH_L: pulse_width_reg[7:0]  <= wdata;
+                    REG_PULSE_WIDTH_H: pulse_width_reg[15:8] <= wdata;
+                    REG_CAM_ENABLE:    cam_enable_reg  <= wdata;
+                    REG_DATA_TYPE:     data_type_reg   <= wdata;
+                    REG_TRIG_DELAY_0:  trig_delay_reg[0] <= wdata;
+                    REG_TRIG_DELAY_1:  trig_delay_reg[1] <= wdata;
+                    REG_TRIG_DELAY_2:  trig_delay_reg[2] <= wdata;
+                    REG_TRIG_DELAY_3:  trig_delay_reg[3] <= wdata;
+                    default: ; // Ignore writes to read-only or undefined registers
+                endcase
+            end
+
+            // CTRL bit 1 (soft reset) is documented as self-clearing: hold it
+            // for one cycle only. chronos_top's camera-reset timer catches the
+            // pulse and runs a full ~5 ms reset ramp from it.
+            if (!(wr_en && addr == REG_CTRL))
+                ctrl_reg[1] <= 1'b0;
         end
     end
     

@@ -258,8 +258,10 @@ ldc_set_port -iobuf {IO_TYPE=LVCMOS33 DRIVE=4}      [get_ports uart_txd]
 
 # Internal PLL output (chronos_pll.sv). Only clk_sys is used now; the recovered
 # byte clocks come from the D-PHY IP, not from the PLL CLKOS.
+# clk_sys = 12 MHz x 16 = 192 MHz (CLKOP feedback; exactly 200 MHz is not
+# reachable from 12 MHz with integer dividers - see chronos_pll.sv).
 create_generated_clock -name clk_sys  -source [get_ports clk_ref_12m] \
-    -multiply_by 50 -divide_by 3 [get_pins u_pll/u_pll_core/CLKOP]
+    -multiply_by 16 [get_pins u_pll/u_pll_core/CLKOP]
 
 # Per-camera recovered RX byte clocks (soft D-PHY: ECLKDIV output, exposed as the
 # wrapper's byte_clk_o). At 800 Mb/s/lane the byte clock is 100 MHz.

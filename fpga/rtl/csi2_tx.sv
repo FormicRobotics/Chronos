@@ -22,7 +22,9 @@ import csi2_pkg::*;
 module csi2_tx #(
     parameter int NUM_LANES = 2,
     parameter int GEAR       = 8,
-    parameter         REF_CLOCK_FREQ = 100,
+    // clk_ref is clk_sys (192 MHz from chronos_pll); regenerate CM/CN/CO from
+    // the Radiant IP Catalog for this reference and the chosen line rate.
+    parameter         REF_CLOCK_FREQ = 192,
     parameter         INT_DATA_RATE  = 800.000000,
     parameter         CM             = "00000000",
     parameter         CN             = "00000",
@@ -104,6 +106,14 @@ module csi2_tx #(
     logic        hs_active;
     logic        data_en;
 
+    // Underflow escape: the prefetch FIFO can only run dry mid-packet if the
+    // arbiter aborted a truncated packet (camera disabled/unplugged mid-frame).
+    // Rather than holding HS forever, terminate the packet after ~2^12 byte
+    // clocks (~40 us): the receiver sees a CRC/length error on that one frame
+    // and the link recovers at the next packet.
+    logic [12:0] uf_cnt;
+    wire         uf_abort = uf_cnt[12];
+
     always_ff @(posedge clk_byte or negedge brst_n) begin
         if (!brst_n) begin
             state    <= ST_IDLE;
@@ -112,10 +122,16 @@ module csi2_tx #(
             byte_lo <= 8'd0; byte_hi <= 8'd0;
             hs_active <= 1'b0; data_en <= 1'b0;
             sop_ready <= 1'b0; pf_rd_en <= 1'b0;
+            uf_cnt    <= '0;
         end else begin
             sop_ready <= 1'b0;
             pf_rd_en  <= 1'b0;
             data_en   <= 1'b0;
+
+            if ((state == ST_PAY || state == ST_PRELOAD) && pf_empty)
+                uf_cnt <= uf_cnt + 1'b1;
+            else
+                uf_cnt <= '0;
 
             unique case (state)
                 //--------------------------------------------------------------
@@ -131,13 +147,17 @@ module csi2_tx #(
                         rem     <= sop_wc;
                         bidx    <= 2'd0;
                         sop_ready <= 1'b1;
-                        state   <= sop_short ? ST_SYNC : ST_PRELOAD;
+                        if (sop_short) state <= ST_SYNC;
+                        else           state <= ST_PRELOAD;
                     end
                 end
                 //--------------------------------------------------------------
                 ST_PRELOAD: begin
-                    // hold in LP until the first payload word is buffered
-                    if (!pf_empty) state <= ST_SYNC;
+                    // hold in LP until the first payload word is buffered;
+                    // if it never arrives (truncated packet aborted upstream)
+                    // drop the packet cleanly - HS has not started yet
+                    if (!pf_empty)     state <= ST_SYNC;
+                    else if (uf_abort) state <= ST_IDLE;
                 end
                 //--------------------------------------------------------------
                 ST_SYNC: begin
@@ -159,11 +179,15 @@ module csi2_tx #(
                     byte_lo <= wc_r[15:8];     // B2
                     byte_hi <= ecc_r;          // B3
                     data_en <= 1'b1;
-                    state   <= short_r ? ST_GAP : ST_PAY;
+                    if (short_r) state <= ST_GAP;
+                    else         state <= ST_PAY;
                 end
                 //--------------------------------------------------------------
                 ST_PAY: begin
-                    if (!pf_empty) begin
+                    if (uf_abort) begin
+                        bidx  <= 2'd0;
+                        state <= ST_CRC;    // terminate the truncated packet
+                    end else if (!pf_empty) begin
                         logic [7:0]  lo, hi;
                         logic [15:0] crc_t;
                         logic [1:0]  nbi;

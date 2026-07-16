@@ -42,6 +42,26 @@ module pulse_cdc (
     assign dst_pulse = s1 ^ s2;
 endmodule
 
+// Stretch a (possibly single-cycle) pulse so it is visible on an LED.
+// Output stays high for 2^W-1 clk cycles after the last input pulse
+// (W=23 at 192 MHz -> ~44 ms).
+module pulse_stretch #(
+    parameter int W = 23
+)(
+    input  wire clk,
+    input  wire rst_n,
+    input  wire pulse,
+    output wire q
+);
+    logic [W-1:0] cnt;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)        cnt <= '0;
+        else if (pulse)    cnt <= '1;
+        else if (cnt != 0) cnt <= cnt - 1'b1;
+    end
+    assign q = (cnt != '0);
+endmodule
+
 // sticky-OR a pulse in its own domain (cleared by reset)
 module sticky_bit (
     input  wire  clk,
